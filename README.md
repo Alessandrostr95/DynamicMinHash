@@ -1,5 +1,5 @@
 # READ ME
-This repository contains the implementation of the $\ell$-buffered $k$-MinHash data structure, as described in the paper *"Maintaining $k$-MinHash Signatures Over Fully-Dynamic Data Streams with Recovery"*.
+This repository contains the implementation of the $\ell$-buffered $k$-MinHash data structure, as described in the paper ["Maintaining $k$-MinHash Signatures Over Fully-Dynamic Data Streams with Recovery"](https://arxiv.org/abs/2407.21614).
 The structure of the repository is as follows:
 - `src/`: contains all the source code of the project.
 - `src/TreeKLMinHash.h`: contains the implementation of the $\ell$-buffered $k$-MinHash data structure.
