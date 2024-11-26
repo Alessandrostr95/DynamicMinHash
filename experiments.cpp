@@ -1,6 +1,5 @@
 #include "src/DSS.cpp"
 #include "src/LSH.cpp"
-#include "src/TreeBottomKL.h"
 #include "src/hash.cpp"
 #include "src/BitArray.cpp"
 #include "src/test/test.cpp"
@@ -9,7 +8,7 @@
 #include <omp.h>
 #include "src/Utils.cpp"
 
-#include "src/TreeKLMinhash.h"
+#include "src/TreeKLMinhash.cpp"
 #include "src/DSS.cpp"
 
 using namespace std;

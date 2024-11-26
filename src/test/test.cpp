@@ -1,7 +1,6 @@
-#include "../TreeKLMinhash.h"
+#include "../TreeKLMinhash.cpp"
 #include "../DSS.cpp"
 #include "../DSSProactive.cpp"
-#include "../TreeBottomKL.h"
 #include "../LSH.cpp"
 #include "../BitArray.cpp"
 #include <algorithm>
