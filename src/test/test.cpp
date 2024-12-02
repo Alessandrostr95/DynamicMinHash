@@ -1,4 +1,5 @@
 #include "../TreeKLMinhash.cpp"
+#include "../ArrayKLMinhash.cpp"
 #include "../DSS.cpp"
 #include "../DSSProactive.cpp"
 #include "../LSH.cpp"
@@ -46,14 +47,24 @@ uint32_t *generate_random_sample(uint32_t N)
  * @param k number of hash functions
  * @param l size of the buffers
  * @param N 2*N is the number of operations
+ * @param tree_buffer if true, the sketch is created with a tree buffer, otherwise an array buffer is used
  */
-void singleSetImplicit(int k, int l, int N)
+void singleSetImplicit(int k, int l, int N, bool tree_buffer = true)
 {
     // counter of faults
     int n_fault = 0;
 
-    // create a new TreeKLMinhash sketch
-    TreeKLMinhash *S = new TreeKLMinhash(k, l, UINT32_MAX, false);
+    Sketch *S;
+    if (tree_buffer)
+    {
+        // create a new TreeKLMinhash sketch
+        S = new TreeKLMinhash(k, l, UINT32_MAX, false);
+    }
+    else
+    {
+        // create a new ArrayKLMinhash sketch
+        S = new ArrayKLMinhash(k, l, UINT32_MAX, false);
+    }
 
     // generate a random sample
     uint32_t *sample = generate_random_sample(N);
@@ -84,7 +95,10 @@ void singleSetImplicit(int k, int l, int N)
     float t = (float)duration.count() / 1000000.0;
 
     // print the results
-    printf("DMH, %d, %d, %u, %d, %f\n", k, l, 2 * N, n_fault, t);
+    if (tree_buffer)
+        printf("tree-DMH, %d, %d, %u, %d, %f\n", k, l, 2 * N, n_fault, t);
+    else
+        printf("array-DMH, %d, %d, %u, %d, %f\n", k, l, 2 * N, n_fault, t);
 
     delete S;
     delete[] sample;
@@ -99,10 +113,22 @@ void singleSetImplicit(int k, int l, int N)
  * @param U size of the universe
  * @param N 2*N is the number of operations
  * @param max_size size of the sliding window
+ * @param tree_buffer if true, the sketch is created with a tree buffer, otherwise an array buffer is used
  */
-void slidingWindowMinHash(int k, int l, uint32_t U, int N, int max_size)
+void slidingWindowMinHash(int k, int l, uint32_t U, int N, int max_size, bool tree_buffer = true)
 {
-    TreeKLMinhash *S = new TreeKLMinhash(k, l, U, false);
+    Sketch *S;
+    if (tree_buffer)
+    {
+        // create a new TreeKLMinhash sketch
+        S = new TreeKLMinhash(k, l, U, false);
+    }
+    else
+    {
+        // create a new ArrayKLMinhash sketch
+        S = new ArrayKLMinhash(k, l, U, false);
+    }
+
     for (int j = 0; j < max_size; j++)
         S->insert(j);
 
@@ -125,7 +151,11 @@ void slidingWindowMinHash(int k, int l, uint32_t U, int N, int max_size)
     auto duration = duration_cast<microseconds>(high_resolution_clock::now() - start);
     float t = (float)duration.count() / 1000000.0;
 
-    printf("%d, %d, %u, %d, %d, %f\n", k, l, 2 * N, max_size, n_fault, t);
+    if (tree_buffer)
+        printf("tree-DMH, %d, %d, %u, %d, %d, %f\n", k, l, 2 * N, max_size, n_fault, t);
+    else
+        printf("array-DMH, %d, %d, %u, %d, %d, %f\n", k, l, 2 * N, max_size, n_fault, t);
+
     delete S;
 }
 
@@ -136,7 +166,7 @@ void slidingWindowMinHash(int k, int l, uint32_t U, int N, int max_size)
  * @param N 2*N is the number of operations
  */
 void testDSS(int c, int N)
-{   
+{
     // create a new DSS sketch
     DSS *S = new DSS(c);
 
@@ -284,11 +314,21 @@ void testDSSProactiveQuery(int c, int size, int n_query, int n_hashes)
  * @param size the size of the initial sample
  * @param n_query the number of queries
  * @param n_hashes number of hash functions
+ * @param tree_buffer if true, the sketch is created with a tree buffer, otherwise an array buffer is used
  */
-void testKLMinhashQuery(int l, int size, int n_query, int n_hashes)
-{   
-    // create a new TreeKLMinhash sketch
-    TreeKLMinhash *S = new TreeKLMinhash(n_hashes, l, UINT32_MAX, false);
+void testKLMinhashQuery(int l, int size, int n_query, int n_hashes, bool tree_buffer = true)
+{
+    Sketch *S;
+    if (tree_buffer)
+    {
+        // create a new TreeKLMinhash sketch
+        S = new TreeKLMinhash(n_hashes, l, UINT32_MAX, false);
+    }
+    else
+    {
+        // create a new ArrayKLMinhash sketch
+        S = new ArrayKLMinhash(n_hashes, l, UINT32_MAX, false);
+    }
 
     // generate a random sample
     uint32_t *sample = generate_random_sample(size);
@@ -307,7 +347,10 @@ void testKLMinhashQuery(int l, int size, int n_query, int n_hashes)
     float t = (float)duration.count() / 1000000.0;
 
     // print the results
-    printf("DMH, %d, %d, %u, %u, %f\n", n_hashes, l, size, n_query, t);
+    if (tree_buffer)
+        printf("tree-DMH, %d, %d, %u, %u, %f\n", n_hashes, l, size, n_query, t);
+    else
+        printf("array-DMH, %d, %d, %u, %u, %f\n", n_hashes, l, size, n_query, t);
 
     delete S;
     delete[] sample;
@@ -323,7 +366,7 @@ void testKLMinhashQuery(int l, int size, int n_query, int n_hashes)
  * @param start the sketch could be initialized with a sample of `start` elements
  */
 void testDSSUpdatesAndQuery(int c, int N, int n_hashes, float p, int start = 1)
-{   
+{
     // create a new DSS sketch
     DSS *S = new DSS(c, n_hashes);
 
@@ -439,11 +482,21 @@ void testDSSProactiveUpdatesAndQuery(int c, int N, int n_hashes, float p, int st
  * @param N 2*N is the number of operations
  * @param p fraction of queries
  * @param start the sketch could be initialized with a sample of `start` elements
+ * @param tree_buffer if true, the sketch is created with a tree buffer, otherwise an array buffer is used
  */
-void testKLMinhashUpdatesAndQuery(int n_hashes, int l, int N, float p, int start = 1)
-{   
-    // create a new TreeKLMinhash sketch
-    TreeKLMinhash *S = new TreeKLMinhash(n_hashes, l, UINT32_MAX, false);
+void testKLMinhashUpdatesAndQuery(int n_hashes, int l, int N, float p, int start = 1, bool tree_buffer)
+{
+    Sketch *S;
+    if (tree_buffer)
+    {
+        // create a new TreeKLMinhash sketch
+        S = new TreeKLMinhash(n_hashes, l, UINT32_MAX, false);
+    }
+    else
+    {
+        // create a new ArrayKLMinhash sketch
+        S = new ArrayKLMinhash(n_hashes, l, UINT32_MAX, false);
+    }
 
     // generate a random sample
     uint32_t *sample = generate_random_sample(N + start);
@@ -495,7 +548,10 @@ void testKLMinhashUpdatesAndQuery(int n_hashes, int l, int N, float p, int start
     float t = (float)duration.count() / 1000000.0;
 
     // print the results
-    printf("DMH, %d, %d, %u, %d, %d, %.2f, %f\n", n_hashes, l, 2 * N, n_hashes, n_fault, p, t);
+    if (tree_buffer)
+        printf("tree-DMH, %d, %d, %u, %d, %d, %.2f, %f\n", n_hashes, l, 2 * N, n_hashes, n_fault, p, t);
+    else
+        printf("tree-DMH, %d, %d, %u, %d, %d, %.2f, %f\n", n_hashes, l, 2 * N, n_hashes, n_fault, p, t);
 
     delete S;
     delete[] sample;
@@ -523,7 +579,7 @@ double SE_DMH(int k, int l, uint32_t U, double p1, double p2, Hash<uint32_t> **h
 
     // create a new TreeKLMinhash sketch for set B
     TreeKLMinhash *SB = new TreeKLMinhash(k, l, UINT32_MAX, hashes, false);
-    
+
     // create the sets A and B
     __type *A = create(U, 0.05);
     __type *B = perturbate(A, U, p1, p2);
@@ -553,7 +609,6 @@ double SE_DMH(int k, int l, uint32_t U, double p1, double p2, Hash<uint32_t> **h
 
     return err * err;
 }
-
 
 /**
  * This experiment evaluates the quality of the Similarity Estimation (SE) of the DSS sketch.

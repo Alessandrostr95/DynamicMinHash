@@ -1,15 +1,18 @@
 #ifndef SKETCH_H
 #define SKETCH_H
 
+#define num uint32_t
+#define NUM_MAX UINT32_MAX
+
 #include <cstdint>
 
 class Sketch
 {
 public:
-    void insert() {}
-    bool remove() { return false; }
+    virtual void insert(num) {}
+    virtual bool remove(num) { return false; }
 
-    uint32_t *getSignature()
+    virtual uint32_t *getSignature()
     {
         return nullptr;
     };

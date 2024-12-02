@@ -25,7 +25,7 @@ void datasetStatistics(std::string);
 int main(int argc, char const *argv[])
 {
   // example of usage
-  // experiment1();
+  experiment1();
   // experiment2();
   // experiment3();
   // experiment4();
@@ -50,25 +50,26 @@ void experiment1()
 {
   uint32_t U = UINT32_MAX;
   int K[4] = {1, 100, 1000, 2000};
-  int N = 1 << 16;
-  int n_tests = 8;
+  int N = 1 << 20;
+  int n_tests = 20;
+  bool tree_buffer = true;
 
 #pragma omp parallel for collapse(2)
 
   for (int n = 0; n < n_tests; n++)
   {
-    for (int i = 0; i < 4; i++)
+    for (int i = 1; i < 3; i++)
     {
       int k = K[i];
 
-      // l = 1
-      singleSetImplicit(k, 1, N);
+      // l = 1 ATTENZIONE ad usare l'array
+      singleSetImplicit(k, 1, N, tree_buffer);
 
       for (int l = 5; l <= 100; l += 5)
-        singleSetImplicit(k, l, N);
+        singleSetImplicit(k, l, N, tree_buffer);
 
       for (int l = 200; l <= 1000; l += 100)
-        singleSetImplicit(k, l, N);
+        singleSetImplicit(k, l, N, tree_buffer);
     }
   }
 }
@@ -85,6 +86,7 @@ void experiment2()
   int N = 1 << 10;
   int max_size = N / 5;
   int n_tests = 10;
+  bool tree_buffer = true;
 
 #pragma omp parallel for
 
@@ -95,17 +97,13 @@ void experiment2()
       int k = K[i];
 
       // l = 1
-      slidingWindowMinHash(k, 1, U, 2 * N, max_size);
+      slidingWindowMinHash(k, 1, U, 2 * N, max_size, tree_buffer);
 
       for (int l = 5; l <= 100; l += 5)
-      {
-        slidingWindowMinHash(k, l, U, 2 * N, max_size);
-      }
+        slidingWindowMinHash(k, l, U, 2 * N, max_size, tree_buffer);
 
       for (int l = 200; l <= 1000; l += 100)
-      {
-        slidingWindowMinHash(k, l, U, 2 * N, max_size);
-      }
+        slidingWindowMinHash(k, l, U, 2 * N, max_size, tree_buffer);
     }
   }
 }
@@ -121,6 +119,7 @@ void experiment3()
   int K[6] = {64, 128, 256, 512, 1024, 2048};
   int l = 32;
   int n_tests = 10;
+  bool tree_buffer = true;
 
   cout << "l-buffered k-minhash" << endl;
 
@@ -128,7 +127,7 @@ void experiment3()
   for (int i = 0; i < 6; i++)
   {
     for (int n = 0; n < n_tests; n++)
-      singleSetImplicit(K[i], l, N);
+      singleSetImplicit(K[i], l, N, tree_buffer);
   }
 
   cout << "DSS" << endl;
@@ -162,11 +161,12 @@ void experiment4()
   int l = 32;
   int n_query = 1 << 16;
   int n_tests = 14;
+  bool tree_buffer = true;
 
 #pragma omp parallel for collapse(2)
   for (int i = 0; i < 6; i++)
     for (int n = 0; n < n_tests; n++)
-      testKLMinhashQuery(l, size, n_query, K[i]);
+      testKLMinhashQuery(l, size, n_query, K[i], tree_buffer);
 
 #pragma omp parallel for collapse(2)
   for (int i = 0; i < 6; i++)
@@ -192,13 +192,14 @@ void experiment5()
   int c = 1024;
   int n_tests = 100;
   float p[15] = {0.001, .005, .01, .05, .1, .15, .2, .25, .3, .35, .40, .45, .5, .55, .6};
+  bool tree_buffer = true;
 
   cout << "sketch,k,l,N,n_hash,faults,p,time" << endl;
 
 #pragma omp parallel for collapse(2)
   for (int i = 0; i < 15; i++)
     for (int n = 0; n < n_tests; n++)
-      testKLMinhashUpdatesAndQuery(n_hashes, l, size, p[i]);
+      testKLMinhashUpdatesAndQuery(n_hashes, l, size, p[i], tree_buffer);
 
 #pragma omp parallel for collapse(2)
   for (int i = 0; i < 15; i++)
