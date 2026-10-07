@@ -23,6 +23,9 @@ void experiment7(std::string, double, int, int, int, int);
 void datasetStatistics(std::string);
 
 void experimentVaryingDeletions();
+void experimentFifoDeletions();
+void experimentBurstyDeletions();
+void experimentHotspotDeletions();
 
 int main(int argc, char const *argv[])
 {
@@ -43,7 +46,16 @@ int main(int argc, char const *argv[])
   // experiment7(datasetName, J, b, r, m, l);
   // datasetStatistics(datasetName);
   
-  experimentVaryingDeletions();
+  // experimentVaryingDeletions();
+  
+
+  // experimentFifoDeletions();
+
+
+  experimentBurstyDeletions();
+
+
+  // experimentHotspotDeletions();
   return 0;
 }
 
@@ -564,6 +576,120 @@ void experimentVaryingDeletions()
           
       }
       
+    }
+  }
+}
+
+
+
+
+/**
+ * Evaluates the performance of DMH under a FIFO / Sliding Window deletion sequence.
+ * Elements are deleted in the exact order they were inserted.
+ */
+void experimentFifoDeletions()
+{
+  int n_k = 2;
+  int K[n_k] = {10, 100};
+  int N = 1 << 16; // N = 65536 operations
+  int window_size = N / 2; // Sliding window holds 50% of elements
+  int n_tests = 20;
+  bool tree_buffer = false; // Array implementation
+
+  cout << "sketch,k,l,N,window_size,faults,time" << endl;
+
+#pragma omp parallel for collapse(2)
+  for (int k_idx = 0; k_idx < n_k; k_idx++)
+  {
+    for (int n = 0; n < n_tests; n++)
+    {
+      int k = K[k_idx];
+
+      // Buffer size l = 1
+      slidingWindowSampleDMH(k, 1, N, window_size, tree_buffer);
+
+      // Buffer size l from 3 to 20 with step 1
+      for (int l = 3; l <= 20; l += 1)
+        slidingWindowSampleDMH(k, l, N, window_size, tree_buffer);
+
+      // Buffer size l from 25 to 100 with step 5
+      for (int l = 21; l <= 100; l += 5)
+        slidingWindowSampleDMH(k, l, N, window_size, tree_buffer);
+    }
+  }
+}
+
+/**
+ * Evaluates the performance of DMH under bursty deletion patterns.
+ * Operations occur in contiguous blocks of insertions followed by contiguous blocks of deletions.
+ */
+void experimentBurstyDeletions()
+{
+  int n_k = 2;
+  int K[n_k] = {10, 100};
+  int N = 1 << 16; 
+  int burst_sizes[2] = {500, 2000}; // Evaluates small and large burst lengths
+  int n_tests = 20;
+  bool tree_buffer = false;
+
+  cout << "sketch,k,l,N,burst_size,faults,time" << endl;
+
+#pragma omp parallel for collapse(3)
+  for (int b_idx = 0; b_idx < 2; b_idx++)
+  {
+    for (int k_idx = 0; k_idx < n_k; k_idx++)
+    {
+      for (int n = 0; n < n_tests; n++)
+      {
+        int k = K[k_idx];
+        int burst_size = burst_sizes[b_idx];
+
+        // Buffer size l = 1
+        burstyDeletionsDMH(k, 1, N, burst_size, tree_buffer);
+
+        // Buffer size l from 3 to 20 with step 1
+        for (int l = 3; l <= 20; l += 1)
+          burstyDeletionsDMH(k, l, N, burst_size, tree_buffer);
+
+        // Buffer size l from 25 to 100 with step 5
+        for (int l = 21; l <= 100; l += 5)
+          burstyDeletionsDMH(k, l, N, burst_size, tree_buffer);
+      }
+    }
+  }
+}
+
+/**
+ * Evaluates the performance of DMH under skewed / Hotspot deletions (Zipfian-like 80/20 rule).
+ * 80% of deletions target a hot active subset (20% of elements).
+ */
+void experimentHotspotDeletions()
+{
+  int n_k = 2;
+  int K[n_k] = {10, 100};
+  int N = 1 << 16;
+  int n_tests = 20;
+  bool tree_buffer = false;
+
+  cout << "sketch,k,l,N,param,faults,time" << endl;
+
+#pragma omp parallel for collapse(2)
+  for (int k_idx = 0; k_idx < n_k; k_idx++)
+  {
+    for (int n = 0; n < n_tests; n++)
+    {
+      int k = K[k_idx];
+
+      // Buffer size l = 1
+      hotspotDeletionsDMH(k, 1, N, tree_buffer);
+
+      // Buffer size l from 3 to 20 with step 1
+      for (int l = 3; l <= 20; l += 1)
+        hotspotDeletionsDMH(k, l, N, tree_buffer);
+
+      // Buffer size l from 25 to 100 with step 5
+      for (int l = 21; l <= 100; l += 5)
+        hotspotDeletionsDMH(k, l, N, tree_buffer);
     }
   }
 }

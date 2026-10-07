@@ -6,6 +6,9 @@
 #include "../BitArray.cpp"
 #include <algorithm>
 #include <chrono>
+
+#include <queue>
+
 using namespace std::chrono;
 using namespace std;
 
@@ -760,6 +763,185 @@ void singleSetImplicitArrayVaryingDeletions(int k, int l, int N, double del_pct)
 
     // Output result format: sketch_type, k, l, total_ops, del_pct, n_faults, execution_time_sec
     printf("array-DMH, %d, %d, %u, %.2f, %d, %f\n", k, l, 2 * N, del_pct, n_fault, t);
+
+    delete S;
+    delete[] sample;
+}
+
+
+
+
+
+void slidingWindowSampleDMH(int k, int l, int N, int window_size, bool tree_buffer = false)
+{
+    int n_fault = 0;
+    Sketch *S = tree_buffer ? (Sketch*)new TreeKLMinhash(k, l, UINT32_MAX, false) 
+                            : (Sketch*)new ArrayKLMinhash(k, l, UINT32_MAX, false);
+
+    uint32_t *sample = generate_random_sample(N + window_size);
+    std::queue<uint32_t> window;
+    
+    // Fill initial window
+    for (int i = 0; i < window_size; i++) {
+        S->insert(sample[i]);
+        window.push(sample[i]);
+    }
+
+    auto start = high_resolution_clock::now();
+
+    // Slide the window N times
+    for (int i = 0; i < N; i++) {
+        // 1. Delete oldest
+        uint32_t oldest = window.front();
+        window.pop();
+        
+        if (S->remove(oldest)) {
+            n_fault++;
+            // Recovery: queue doesn't allow iteration, so we copy it to recover
+            std::queue<uint32_t> temp = window;
+            while(!temp.empty()) {
+                S->insert(temp.front());
+                temp.pop();
+            }
+        }
+        
+        // 2. Insert newest
+        uint32_t newest = sample[window_size + i];
+        S->insert(newest);
+        window.push(newest);
+    }
+
+    auto duration = duration_cast<microseconds>(high_resolution_clock::now() - start);
+    float t = (float)duration.count() / 1000000.0;
+
+    printf("%s-DMH_FIFO, %d, %d, %d, %d, %d, %f\n", 
+           tree_buffer ? "tree" : "array", k, l, N, window_size, n_fault, t);
+
+    delete S;
+    delete[] sample;
+}
+
+
+void burstyDeletionsDMH(int k, int l, int N, int burst_size, bool tree_buffer = false)
+{
+    int n_fault = 0;
+    Sketch *S = tree_buffer ? (Sketch*)new TreeKLMinhash(k, l, UINT32_MAX, false) 
+                            : (Sketch*)new ArrayKLMinhash(k, l, UINT32_MAX, false);
+
+    uint32_t *sample = generate_random_sample(2 * N);
+    std::vector<uint32_t> active_elements;
+    active_elements.reserve(N);
+
+    // Initial population
+    for (int i = 0; i < N/2; i++) {
+        S->insert(sample[i]);
+        active_elements.push_back(sample[i]);
+    }
+
+    int sample_idx = N/2;
+    std::random_device rd;
+    std::mt19937 g(rd());
+
+    auto start = high_resolution_clock::now();
+
+    // N operations executed in bursts
+    int ops_completed = 0;
+    while (ops_completed < N) {
+        // Burst of Insertions
+        for (int i = 0; i < burst_size && ops_completed < N; i++, ops_completed++) {
+            uint32_t val = sample[sample_idx++];
+            S->insert(val);
+            active_elements.push_back(val);
+        }
+        // Burst of Deletions
+        for (int i = 0; i < burst_size && ops_completed < N && !active_elements.empty(); i++, ops_completed++) {
+            std::uniform_int_distribution<size_t> dist(0, active_elements.size() - 1);
+            size_t idx = dist(g);
+            uint32_t val = active_elements[idx];
+
+            active_elements[idx] = active_elements.back();
+            active_elements.pop_back();
+
+            if (S->remove(val)) {
+                n_fault++;
+                for (uint32_t el : active_elements) S->insert(el);
+            }
+        }
+    }
+
+    auto duration = duration_cast<microseconds>(high_resolution_clock::now() - start);
+    float t = (float)duration.count() / 1000000.0;
+
+    printf("%s-DMH_BURST, %d, %d, %d, %d, %d, %f\n", 
+           tree_buffer ? "tree" : "array", k, l, N, burst_size, n_fault, t);
+
+    delete S;
+    delete[] sample;
+}
+
+void hotspotDeletionsDMH(int k, int l, int N, bool tree_buffer = false)
+{
+    int n_fault = 0;
+    Sketch *S = tree_buffer ? (Sketch*)new TreeKLMinhash(k, l, UINT32_MAX, false) 
+                            : (Sketch*)new ArrayKLMinhash(k, l, UINT32_MAX, false);
+
+    uint32_t *sample = generate_random_sample(2 * N);
+    
+    std::vector<uint32_t> hot_pool;
+    std::vector<uint32_t> cold_pool;
+    
+    // Populate pools (20% hot, 80% cold)
+    int n_hot = (int)(N * 0.2);
+    for (int i = 0; i < n_hot; i++) {
+        S->insert(sample[i]);
+        hot_pool.push_back(sample[i]);
+    }
+    for (int i = n_hot; i < N; i++) {
+        S->insert(sample[i]);
+        cold_pool.push_back(sample[i]);
+    }
+
+    int sample_idx = N;
+    std::random_device rd;
+    std::mt19937 g(rd());
+    std::uniform_int_distribution<int> dist100(0, 99);
+
+    auto start = high_resolution_clock::now();
+
+    for (int i = 0; i < N; i++) {
+        // 80% chance to target the hot pool for deletion
+        bool target_hot = (dist100(g) < 80) && !hot_pool.empty();
+        if (!target_hot && cold_pool.empty()) target_hot = true;
+
+        std::vector<uint32_t>& target_pool = target_hot ? hot_pool : cold_pool;
+        
+        if (!target_pool.empty()) {
+            std::uniform_int_distribution<size_t> distPool(0, target_pool.size() - 1);
+            size_t idx = distPool(g);
+            uint32_t val = target_pool[idx];
+
+            target_pool[idx] = target_pool.back();
+            target_pool.pop_back();
+
+            if (S->remove(val)) {
+                n_fault++;
+                for (uint32_t el : hot_pool) S->insert(el);
+                for (uint32_t el : cold_pool) S->insert(el);
+            }
+        }
+        
+        // Re-insert new element into the appropriate pool to maintain the 80/20 size ratio
+        uint32_t val = sample[sample_idx++];
+        S->insert(val);
+        if (target_hot) hot_pool.push_back(val);
+        else cold_pool.push_back(val);
+    }
+
+    auto duration = duration_cast<microseconds>(high_resolution_clock::now() - start);
+    float t = (float)duration.count() / 1000000.0;
+
+    printf("%s-DMH_HOTSPOT, %d, %d, %d, N/A, %d, %f\n", 
+           tree_buffer ? "tree" : "array", k, l, N, n_fault, t);
 
     delete S;
     delete[] sample;
