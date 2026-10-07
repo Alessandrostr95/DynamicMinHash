@@ -22,10 +22,10 @@ void experiment6();
 void experiment7(std::string, double, int, int, int, int);
 void datasetStatistics(std::string);
 
-void experimentVaryingDeletions();
-void experimentFifoDeletions();
-void experimentBurstyDeletions();
-void experimentHotspotDeletions();
+void experimentVaryingDeletions(int N, int n_tests);
+void experimentFifoDeletions(int N, int n_tests);
+void experimentBurstyDeletions(int N, int n_tests);
+void experimentHotspotDeletions(int N, int n_tests);
 
 int main(int argc, char const *argv[])
 {
@@ -52,10 +52,46 @@ int main(int argc, char const *argv[])
   // experimentFifoDeletions();
 
 
-  experimentBurstyDeletions();
+  // experimentBurstyDeletions();
 
 
   // experimentHotspotDeletions();
+  if (argc < 3)
+    {
+      std::cerr << "Usage: " << argv[0] << " <exp_id> <N> [n_tests]" << std::endl;
+      std::cerr << "  exp_id:" << std::endl;
+      std::cerr << "    1: experimentVaryingDeletions" << std::endl;
+      std::cerr << "    2: experimentFifoDeletions" << std::endl;
+      std::cerr << "    3: experimentBurstyDeletions" << std::endl;
+      std::cerr << "    4: experimentHotspotDeletions" << std::endl;
+      std::cerr << "  N: number of operations/elements (e.g., 65536)" << std::endl;
+      std::cerr << "  n_tests: (optional) number of repetitions (default: 20)" << std::endl;
+      return 1;
+    }
+  
+  int exp_id = std::atoi(argv[1]);
+  int N = std::atoi(argv[2]);
+  int n_tests = (argc >= 4) ? std::atoi(argv[3]) : 20;
+
+  switch (exp_id)
+  {
+  case 1:
+    experimentVaryingDeletions(N, n_tests);
+    break;
+  case 2:
+    experimentFifoDeletions(N, n_tests);
+    break;
+  case 3:
+    experimentBurstyDeletions(N, n_tests);
+    break;
+  case 4:
+    experimentHotspotDeletions(N, n_tests);
+    break;
+  default:
+    std::cerr << "Error: Unknown experiment ID '" << exp_id << "'. Use 1, 2, 3, or 4." << std::endl;
+    return 1;
+  }
+
   return 0;
 }
 
@@ -541,12 +577,12 @@ void datasetStatistics(std::string datasetName)
  * This experiment evaluates the performance of ArrayKLMinhash across varying ratios of
  * deletions (100% down to 10% in steps of 10%) during dynamic update streams.
  */
-void experimentVaryingDeletions()
+void experimentVaryingDeletions(int N, int n_tests = 20)
 {
   int n_k = 2;
   int K[n_k] = {1000, 100};
-  int N = 1 << 16; // N = 65536 elements matching Figure 2 setup
-  int n_tests = 20;
+  //int N = 1 << 16; // N = 65536 elements matching Figure 2 setup
+  //int n_tests = 20;
   int n_perc = 3;
   //double deletion_percentages[10] = {0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1};
   double deletion_percentages[n_perc] = { 0.9, 0.5,  0.1};
@@ -587,13 +623,13 @@ void experimentVaryingDeletions()
  * Evaluates the performance of DMH under a FIFO / Sliding Window deletion sequence.
  * Elements are deleted in the exact order they were inserted.
  */
-void experimentFifoDeletions()
+void experimentFifoDeletions(int N, int n_tests = 20)
 {
   int n_k = 2;
   int K[n_k] = {10, 100};
-  int N = 1 << 16; // N = 65536 operations
+  //int N = 1 << 16; // N = 65536 operations
   int window_size = N / 2; // Sliding window holds 50% of elements
-  int n_tests = 20;
+  //int n_tests = 20;
   bool tree_buffer = false; // Array implementation
 
   cout << "sketch,k,l,N,window_size,faults,time" << endl;
@@ -623,13 +659,13 @@ void experimentFifoDeletions()
  * Evaluates the performance of DMH under bursty deletion patterns.
  * Operations occur in contiguous blocks of insertions followed by contiguous blocks of deletions.
  */
-void experimentBurstyDeletions()
+void experimentBurstyDeletions(int N, int n_tests = 20)
 {
   int n_k = 2;
   int K[n_k] = {10, 100};
-  int N = 1 << 16; 
+  //int N = 1 << 16; 
   int burst_sizes[2] = {500, 2000}; // Evaluates small and large burst lengths
-  int n_tests = 20;
+  //int n_tests = 20;
   bool tree_buffer = false;
 
   cout << "sketch,k,l,N,burst_size,faults,time" << endl;
@@ -663,12 +699,12 @@ void experimentBurstyDeletions()
  * Evaluates the performance of DMH under skewed / Hotspot deletions (Zipfian-like 80/20 rule).
  * 80% of deletions target a hot active subset (20% of elements).
  */
-void experimentHotspotDeletions()
+void experimentHotspotDeletions(int N, int n_tests = 20)
 {
   int n_k = 2;
   int K[n_k] = {10, 100};
-  int N = 1 << 16;
-  int n_tests = 20;
+  //int N = 1 << 16;
+  //int n_tests = 20;
   bool tree_buffer = false;
 
   cout << "sketch,k,l,N,param,faults,time" << endl;
