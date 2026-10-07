@@ -22,10 +22,12 @@ void experiment6();
 void experiment7(std::string, double, int, int, int, int);
 void datasetStatistics(std::string);
 
+void experimentVaryingDeletions();
+
 int main(int argc, char const *argv[])
 {
   // example of usage
-  experiment1();
+  // experiment1();
   // experiment2();
   // experiment3();
   // experiment4();
@@ -40,6 +42,8 @@ int main(int argc, char const *argv[])
   // double J = 0.1;
   // experiment7(datasetName, J, b, r, m, l);
   // datasetStatistics(datasetName);
+  
+  experimentVaryingDeletions();
   return 0;
 }
 
@@ -518,4 +522,48 @@ void datasetStatistics(std::string datasetName)
   cout << "Pairs with Jaccard similarity greater than or equal to:" << endl;
   for (int i = 0; i < 10; i++)
     printf("\t%.2f: %d pairs ~ %.4f%%\n", fractions[i], effectivePositive[i], (effectivePositive[i] / (double)(n * (n - 1) / 2)) * 100);
+}
+
+
+/**
+ * This experiment evaluates the performance of ArrayKLMinhash across varying ratios of
+ * deletions (100% down to 10% in steps of 10%) during dynamic update streams.
+ */
+void experimentVaryingDeletions()
+{
+  int n_k = 2;
+  int K[n_k] = {1000, 100};
+  int N = 1 << 16; // N = 65536 elements matching Figure 2 setup
+  int n_tests = 20;
+  int n_perc = 3;
+  //double deletion_percentages[10] = {0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1};
+  double deletion_percentages[n_perc] = { 0.9, 0.5,  0.1};
+
+  cout << "sketch,k,l,total_ops,del_pct,faults,time" << endl;
+
+#pragma omp parallel for collapse(3)
+  for (int p_idx = 0; p_idx < n_perc; p_idx++)
+  {
+    for (int k_idx = 0; k_idx < n_k; k_idx++)
+    {
+      for (int n = 0; n < n_tests; n++)
+      {
+        int k = K[k_idx];
+        double del_pct = deletion_percentages[p_idx];
+
+        // Buffer size l = 1 (Array implementation)
+        //singleSetImplicitArrayVaryingDeletions(k, 1, N, del_pct);
+
+        // Buffer size l from 5 to 100 with step 5
+        for (int l = 3; l <= 20; l += 1)
+          singleSetImplicitArrayVaryingDeletions(k, l, N, del_pct);
+
+        // Buffer size l from 200 to 1000 with step 100
+        for (int l = 21; l <= 100; l += 5)
+          singleSetImplicitArrayVaryingDeletions(k, l, N, del_pct);
+          
+      }
+      
+    }
+  }
 }

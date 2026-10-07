@@ -484,7 +484,7 @@ void testDSSProactiveUpdatesAndQuery(int c, int N, int n_hashes, float p, int st
  * @param start the sketch could be initialized with a sample of `start` elements
  * @param tree_buffer if true, the sketch is created with a tree buffer, otherwise an array buffer is used
  */
-void testKLMinhashUpdatesAndQuery(int n_hashes, int l, int N, float p, int start = 1, bool tree_buffer)
+void testKLMinhashUpdatesAndQuery(int n_hashes, int l, int N, float p, int start = 1, bool tree_buffer = 1)
 {
     Sketch *S;
     if (tree_buffer)
@@ -666,4 +666,101 @@ double SE_DSS(int c, int k, uint32_t U, double p1, double p2, Hash<uint32_t> **h
     delete[] B;
 
     return err * err;
+}
+
+
+/**
+ * This experiment evaluates the performance of the ArrayKLMinhash sketch (Array implementation of l-buffered k-minhash)
+ * over a sequence of N insertions followed by N operations with a controlled percentage of deletions.
+ *
+ * @param k number of hash functions
+ * @param l size of the buffers
+ * @param N initial set size (N insertions in phase 1, N total operations in phase 2)
+ * @param del_pct fraction of deletions in phase 2 (from 1.0 down to 0.1)
+ */
+void singleSetImplicitArrayVaryingDeletions(int k, int l, int N, double del_pct)
+{
+    int n_fault = 0;
+
+    // Force ArrayKLMinhash implementation (tree_buffer = false)
+    Sketch *S = new ArrayKLMinhash(k, l, UINT32_MAX, false);
+
+    // Generate sample pool: N initial elements + N pool elements for phase 2 insertions
+    uint32_t *sample = generate_random_sample(2 * N);
+
+    // Dynamic array tracking active elements currently present in the sketch
+    vector<uint32_t> active_elements;
+    active_elements.reserve(2 * N);
+
+    // Determine the number of deletions and insertions in phase 2
+    int n_deletions = (int)std::round(N * del_pct);
+    int n_insertions = N - n_deletions;
+
+    // Construct operation sequence vector: 1 = Deletion, 0 = Insertion
+    vector<int> ops;
+    ops.reserve(N);
+    for (int i = 0; i < n_deletions; i++) ops.push_back(1);
+    for (int i = 0; i < n_insertions; i++) ops.push_back(0);
+
+    // Uniformly shuffle operations to interleave insertions and deletions
+    std::random_device rd;
+    std::mt19937 g(rd());
+    std::shuffle(ops.begin(), ops.end(), g);
+
+    int next_insert_idx = N; // Pointer to fresh elements in sample pool
+
+    // Start execution timer
+    auto start = high_resolution_clock::now();
+
+    // Phase 1: N initial insertions to construct the full set
+    for (int i = 0; i < N; i++)
+    {
+        S->insert(sample[i]);
+        active_elements.push_back(sample[i]);
+    }
+
+    // Phase 2: N dynamic operations
+    for (int op : ops)
+    {
+        if (op == 1 && !active_elements.empty())
+        {
+            // Deletion: Select an active element uniformly at random
+            std::uniform_int_distribution<size_t> dist(0, active_elements.size() - 1);
+            size_t idx = dist(g);
+            uint32_t val = active_elements[idx];
+
+            // Remove selected element from active tracking vector in O(1)
+            active_elements[idx] = active_elements.back();
+            active_elements.pop_back();
+
+            // Execute removal from ArrayKLMinhash sketch
+            int doFault = S->remove(val);
+            if (doFault)
+            {
+                n_fault++;
+                // Recovery Query: re-populate sketch with all remaining active elements
+                for (uint32_t el : active_elements)
+                {
+                    S->insert(el);
+                }
+            }
+        }
+        else
+        {
+            // Insertion: insert a fresh element into the sketch
+            uint32_t val = sample[next_insert_idx++];
+            S->insert(val);
+            active_elements.push_back(val);
+        }
+    }
+
+    // Stop execution timer
+    auto duration = duration_cast<microseconds>(high_resolution_clock::now() - start);
+    float t = (float)duration.count() / 1000000.0;
+
+    // Output result format: sketch_type, k, l, total_ops, del_pct, n_faults, execution_time_sec
+    printf("array-DMH, %d, %d, %u, %.2f, %d, %f\n", k, l, 2 * N, del_pct, n_fault, t);
+
+    delete S;
+    delete[] sample;
 }
