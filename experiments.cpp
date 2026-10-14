@@ -579,7 +579,7 @@ void datasetStatistics(std::string datasetName)
  */
 void experimentVaryingDeletions(int N, int n_tests = 20)
 {
-  int n_k = 2;
+  int n_k = 4;
   int K[n_k] = {2000, 1000, 100, 1};
   //int N = 1 << 16; // N = 65536 elements matching Figure 2 setup
   //int n_tests = 20;
@@ -592,15 +592,16 @@ void experimentVaryingDeletions(int N, int n_tests = 20)
 #pragma omp parallel for collapse(3)
   for (int p_idx = 0; p_idx < n_perc; p_idx++)
   {
-    double del_pct = deletion_percentages[p_idx];
+
     for (int k_idx = 0; k_idx < n_k; k_idx++)
     {
-      int k = K[k_idx];
-      singleSetImplicitArrayVaryingDeletions(k, 1, N, del_pct);
       for (int n = 0; n < n_tests; n++)
       {
 
 
+        int k = K[k_idx];
+        double del_pct = deletion_percentages[p_idx];
+        singleSetImplicitArrayVaryingDeletions(k, 1, N, del_pct);
 
         // Buffer size l = 1 (Array implementation)
         //singleSetImplicitArrayVaryingDeletions(k, 1, N, del_pct);
@@ -628,7 +629,7 @@ void experimentVaryingDeletions(int N, int n_tests = 20)
  */
 void experimentFifoDeletions(int N, int n_tests = 20)
 {
-  int n_k = 2;
+  int n_k = 4;
   int K[n_k] = {2000, 1000, 100, 1};
   //int N = 1 << 16; // N = 65536 operations
   int window_size = N / 2; // Sliding window holds 50% of elements
@@ -640,14 +641,14 @@ void experimentFifoDeletions(int N, int n_tests = 20)
 #pragma omp parallel for collapse(2)
   for (int k_idx = 0; k_idx < n_k; k_idx++)
   {
-    int k = K[k_idx];
 
-      // Buffer size l = 1
-    slidingWindowSampleDMH(k, 1, N, window_size, tree_buffer);
 
     for (int n = 0; n < n_tests; n++)
     {
-      
+      int k = K[k_idx];
+  
+      // Buffer size l = 1
+      slidingWindowSampleDMH(k, 1, N, window_size, tree_buffer);
       // Buffer size l from 3 to 20 with step 1
       for (int l = 2; l <= 20; l += 1)
         slidingWindowSampleDMH(k, l, N, window_size, tree_buffer);
@@ -665,7 +666,7 @@ void experimentFifoDeletions(int N, int n_tests = 20)
  */
 void experimentBurstyDeletions(int N, int n_tests = 20)
 {
-  int n_k = 2;
+  int n_k = 4;
   int K[n_k] = {2000, 1000, 100, 1};
   //int N = 1 << 16; 
   int burst_sizes[2] = {500, 2000}; // Evaluates small and large burst lengths
@@ -679,15 +680,15 @@ void experimentBurstyDeletions(int N, int n_tests = 20)
   {
     for (int k_idx = 0; k_idx < n_k; k_idx++)
     {
-      int k = K[k_idx];
-      int burst_size = burst_sizes[b_idx];
-
-        // Buffer size l = 1
-      burstyDeletionsDMH(k, 1, N, burst_size, tree_buffer);
       for (int n = 0; n < n_tests; n++)
       {
         
 
+        int k = K[k_idx];
+        int burst_size = burst_sizes[b_idx];
+
+        // Buffer size l = 1
+        burstyDeletionsDMH(k, 1, N, burst_size, tree_buffer);
         // Buffer size l from 3 to 20 with step 1
         for (int l = 2; l <= 20; l += 1)
           burstyDeletionsDMH(k, l, N, burst_size, tree_buffer);
@@ -706,7 +707,7 @@ void experimentBurstyDeletions(int N, int n_tests = 20)
  */
 void experimentHotspotDeletions(int N, int n_tests = 20)
 {
-  int n_k = 2;
+  int n_k = 4;
   int K[n_k] = {2000, 1000, 100, 1};
   //int N = 1 << 16;
   //int n_tests = 20;
@@ -717,13 +718,13 @@ void experimentHotspotDeletions(int N, int n_tests = 20)
 #pragma omp parallel for collapse(2)
   for (int k_idx = 0; k_idx < n_k; k_idx++)
   {
-    int k = K[k_idx];
 
-      // Buffer size l = 1
-    hotspotDeletionsDMH(k, 1, N, tree_buffer);
     for (int n = 0; n < n_tests; n++)
     {
+      int k = K[k_idx];
 
+      // Buffer size l = 1
+      hotspotDeletionsDMH(k, 1, N, tree_buffer);
       // Buffer size l from 3 to 20 with step 1
       for (int l = 2; l <= 20; l += 1)
         hotspotDeletionsDMH(k, l, N, tree_buffer);
