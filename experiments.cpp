@@ -580,7 +580,7 @@ void datasetStatistics(std::string datasetName)
 void experimentVaryingDeletions(int N, int n_tests = 20)
 {
   int n_k = 2;
-  int K[n_k] = {1000, 100};
+  int K[n_k] = {2000, 1000, 100, 1};
   //int N = 1 << 16; // N = 65536 elements matching Figure 2 setup
   //int n_tests = 20;
   int n_perc = 3;
@@ -592,18 +592,21 @@ void experimentVaryingDeletions(int N, int n_tests = 20)
 #pragma omp parallel for collapse(3)
   for (int p_idx = 0; p_idx < n_perc; p_idx++)
   {
+    double del_pct = deletion_percentages[p_idx];
     for (int k_idx = 0; k_idx < n_k; k_idx++)
     {
+      int k = K[k_idx];
+      singleSetImplicitArrayVaryingDeletions(k, 1, N, del_pct);
       for (int n = 0; n < n_tests; n++)
       {
-        int k = K[k_idx];
-        double del_pct = deletion_percentages[p_idx];
+
+
 
         // Buffer size l = 1 (Array implementation)
         //singleSetImplicitArrayVaryingDeletions(k, 1, N, del_pct);
 
         // Buffer size l from 5 to 100 with step 5
-        for (int l = 3; l <= 20; l += 1)
+        for (int l = 2; l <= 20; l += 1)
           singleSetImplicitArrayVaryingDeletions(k, l, N, del_pct);
 
         // Buffer size l from 200 to 1000 with step 100
@@ -626,7 +629,7 @@ void experimentVaryingDeletions(int N, int n_tests = 20)
 void experimentFifoDeletions(int N, int n_tests = 20)
 {
   int n_k = 2;
-  int K[n_k] = {10, 100};
+  int K[n_k] = {2000, 1000, 100, 1};
   //int N = 1 << 16; // N = 65536 operations
   int window_size = N / 2; // Sliding window holds 50% of elements
   //int n_tests = 20;
@@ -637,15 +640,16 @@ void experimentFifoDeletions(int N, int n_tests = 20)
 #pragma omp parallel for collapse(2)
   for (int k_idx = 0; k_idx < n_k; k_idx++)
   {
-    for (int n = 0; n < n_tests; n++)
-    {
-      int k = K[k_idx];
+    int k = K[k_idx];
 
       // Buffer size l = 1
-      slidingWindowSampleDMH(k, 1, N, window_size, tree_buffer);
+    slidingWindowSampleDMH(k, 1, N, window_size, tree_buffer);
 
+    for (int n = 0; n < n_tests; n++)
+    {
+      
       // Buffer size l from 3 to 20 with step 1
-      for (int l = 3; l <= 20; l += 1)
+      for (int l = 2; l <= 20; l += 1)
         slidingWindowSampleDMH(k, l, N, window_size, tree_buffer);
 
       // Buffer size l from 25 to 100 with step 5
@@ -662,7 +666,7 @@ void experimentFifoDeletions(int N, int n_tests = 20)
 void experimentBurstyDeletions(int N, int n_tests = 20)
 {
   int n_k = 2;
-  int K[n_k] = {10, 100};
+  int K[n_k] = {2000, 1000, 100, 1};
   //int N = 1 << 16; 
   int burst_sizes[2] = {500, 2000}; // Evaluates small and large burst lengths
   //int n_tests = 20;
@@ -675,16 +679,17 @@ void experimentBurstyDeletions(int N, int n_tests = 20)
   {
     for (int k_idx = 0; k_idx < n_k; k_idx++)
     {
-      for (int n = 0; n < n_tests; n++)
-      {
-        int k = K[k_idx];
-        int burst_size = burst_sizes[b_idx];
+      int k = K[k_idx];
+      int burst_size = burst_sizes[b_idx];
 
         // Buffer size l = 1
-        burstyDeletionsDMH(k, 1, N, burst_size, tree_buffer);
+      burstyDeletionsDMH(k, 1, N, burst_size, tree_buffer);
+      for (int n = 0; n < n_tests; n++)
+      {
+        
 
         // Buffer size l from 3 to 20 with step 1
-        for (int l = 3; l <= 20; l += 1)
+        for (int l = 2; l <= 20; l += 1)
           burstyDeletionsDMH(k, l, N, burst_size, tree_buffer);
 
         // Buffer size l from 25 to 100 with step 5
@@ -702,7 +707,7 @@ void experimentBurstyDeletions(int N, int n_tests = 20)
 void experimentHotspotDeletions(int N, int n_tests = 20)
 {
   int n_k = 2;
-  int K[n_k] = {10, 100};
+  int K[n_k] = {2000, 1000, 100, 1};
   //int N = 1 << 16;
   //int n_tests = 20;
   bool tree_buffer = false;
@@ -712,15 +717,15 @@ void experimentHotspotDeletions(int N, int n_tests = 20)
 #pragma omp parallel for collapse(2)
   for (int k_idx = 0; k_idx < n_k; k_idx++)
   {
-    for (int n = 0; n < n_tests; n++)
-    {
-      int k = K[k_idx];
+    int k = K[k_idx];
 
       // Buffer size l = 1
-      hotspotDeletionsDMH(k, 1, N, tree_buffer);
+    hotspotDeletionsDMH(k, 1, N, tree_buffer);
+    for (int n = 0; n < n_tests; n++)
+    {
 
       // Buffer size l from 3 to 20 with step 1
-      for (int l = 3; l <= 20; l += 1)
+      for (int l = 2; l <= 20; l += 1)
         hotspotDeletionsDMH(k, l, N, tree_buffer);
 
       // Buffer size l from 25 to 100 with step 5
