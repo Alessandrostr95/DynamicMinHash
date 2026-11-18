@@ -16,12 +16,45 @@
 #include <utility>
 #include <vector>
 
+/// General-stream buffered MinHash sketches and their hash configurations.
 namespace buffered_minhash {
 
-enum class BufferKind { Array, Tree };
-enum class UpdateResult { Ok, NeedsRecovery };
-enum class SketchState { Ready, NeedsRecovery };
+/// Storage strategy for each bounded buffer; both implement the same set semantics.
+enum class BufferKind {
+    Array, ///< Unordered contiguous entries; buffer searches take linear time.
+    Tree   ///< Ordered distinct entries; searches and updates take logarithmic time.
+};
 
+/// Outcome of an update, describing sketch validity rather than set membership.
+enum class UpdateResult {
+    Ok,           ///< The sketch remains ready, including after a redundant update.
+    NeedsRecovery ///< A buffer was exhausted; restore the current set before reuse.
+};
+
+/// Whether incremental updates and signature access are currently allowed.
+enum class SketchState {
+    Ready,        ///< Valid sketch, possibly representing a known empty set.
+    NeedsRecovery ///< Updates and signature access are blocked until restoration.
+};
+
+/**
+ * @brief Maintains a k-MinHash signature under set insertions and deletions.
+ * @tparam Element Element identity type: uint32_t (default) or uint64_t.
+ * @tparam Kind Buffer representation: Array (default) or Tree.
+ * @tparam Hash Immutable hash function type satisfying HashFunction, with input type
+ * Element. Defaults to TabulationHash<Element> with uint64_t outputs.
+ *
+ * Each of the k hash functions has a buffer of at most ell distinct
+ * (hash, element) pairs. Duplicate insertions and deletion of absent elements
+ * are supported. The sketch neither owns nor retains the authoritative set.
+ * Update that set before calling insert() or erase(). If a deletion exhausts
+ * a buffer, restore() must rebuild the sketch from the current set.
+ *
+ * Copies have independent buffers and share only the immutable hash family.
+ * Access to a single sketch must be externally synchronized.
+ * @note Hash evaluation, allocations, and input traversal are assumed to
+ * succeed; unexpected-exception recovery is not part of the current contract.
+ */
 template<ElementType Element = std::uint32_t,
          BufferKind Kind = BufferKind::Array,
          class Hash = TabulationHash<Element>>
@@ -29,13 +62,24 @@ template<ElementType Element = std::uint32_t,
              (Kind == BufferKind::Array || Kind == BufferKind::Tree)
 class BufferedMinhash {
 public:
+    /// Exact identity type stored alongside each buffered hash.
     using element_type = Element;
+    /// Hash output and signature coordinate type, independent of element width.
     using hash_type = typename Hash::hash_type;
+    /// Immutable ordered configuration of the k concrete hash functions.
     using hash_family_type = HashFamily<Hash>;
+    /// Shared ownership handle keeping the hash configuration alive.
     using hash_family_ptr = std::shared_ptr<const hash_family_type>;
+    /// Non-owning, read-only view of the k signature coordinates.
     using signature_view = std::span<const hash_type>;
 
-    // The external configuration determines k; capacity is ell.
+    /**
+     * @brief Constructs a ready, empty sketch using shared hash functions.
+     * @param capacity Maximum number of distinct pairs per buffer (ell); positive.
+     * @param hashes Non-null shared configuration; its function count determines k.
+     * @throws std::invalid_argument If capacity is zero or hashes is null.
+     * @note The configuration is shared, not cloned. The new signature is empty.
+     */
     BufferedMinhash(std::size_t capacity, hash_family_ptr hashes)
         : hashes_(std::move(hashes)), capacity_(capacity) {
         if (!hashes_ || capacity == 0) {
@@ -49,17 +93,52 @@ public:
         signature_.resize(hashes_->size());
     }
 
+    /**
+     * @brief Constructs a ready, empty sketch with automatically seeded hashes.
+     * @param k Number of hash functions and signature coordinates; positive.
+     * @param capacity Maximum number of distinct pairs per buffer (ell); positive.
+     * @throws std::invalid_argument If k or capacity is zero.
+     * @note Available when Hash accepts a uint64_t seed. Reuse hash_family() to
+     * create compatible sketches; independent construction need not be compatible.
+     */
     BufferedMinhash(std::size_t k, std::size_t capacity)
         requires std::constructible_from<Hash, std::uint64_t>
         : BufferedMinhash(capacity, make_hash_family<Element, Hash>(k)) {}
 
+    /**
+     * @brief Constructs a ready, empty sketch with reproducibly seeded hashes.
+     * @param k Number of hash functions and signature coordinates; positive.
+     * @param capacity Maximum number of distinct pairs per buffer (ell); positive.
+     * @param seed Seed used to generate the ordered hash configuration.
+     * @throws std::invalid_argument If k or capacity is zero.
+     * @note Available when Hash accepts a uint64_t seed. Custom hash constructors
+     * must be deterministic for seeded construction to be reproducible.
+     */
     BufferedMinhash(std::size_t k, std::size_t capacity, std::uint64_t seed)
         requires std::constructible_from<Hash, std::uint64_t>
         : BufferedMinhash(capacity, make_hash_family<Element, Hash>(k, seed)) {}
 
-    BufferedMinhash(const BufferedMinhash&) = default;
-    BufferedMinhash& operator=(const BufferedMinhash&) = default;
+    /**
+     * @brief Copies buffers, thresholds, signature, and state independently.
+     * @param other Sketch to copy, including a possible NeedsRecovery state.
+     * @note Only the immutable hash configuration is shared with other.
+     */
+    BufferedMinhash(const BufferedMinhash& other) = default;
 
+    /**
+     * @brief Replaces this sketch with an independent copy of another's state.
+     * @param other Sketch whose buffers/state are copied and hashes shared.
+     * @return This sketch.
+     * @note Previously obtained signature views of this sketch must not be reused.
+     */
+    BufferedMinhash& operator=(const BufferedMinhash& other) = default;
+
+    /**
+     * @brief Transfers another sketch's buffers, configuration, and state.
+     * @param other Source sketch, left unconfigured in NeedsRecovery state.
+     * @note Assign a configured sketch to other before reusing it; restore()
+     * cannot configure a moved-from sketch. Discard its prior signature views.
+     */
     BufferedMinhash(BufferedMinhash&& other) noexcept
         : hashes_(std::move(other.hashes_)),
           capacity_(std::exchange(other.capacity_, 0)),
@@ -67,6 +146,13 @@ public:
           signature_(std::move(other.signature_)),
           state_(std::exchange(other.state_, SketchState::NeedsRecovery)) {}
 
+    /**
+     * @brief Replaces this sketch by transferring another sketch's state.
+     * @param other Source, left unconfigured in NeedsRecovery unless self-assigned.
+     * @return This sketch.
+     * @note Discard prior signature views of both objects. A moved-from source
+     * must be assigned a configured sketch before reuse.
+     */
     BufferedMinhash& operator=(BufferedMinhash&& other) noexcept {
         if (this != &other) {
             hashes_ = std::move(other.hashes_);
@@ -79,19 +165,58 @@ public:
         return *this;
     }
 
+    /**
+     * @brief Returns the configured number of hash functions (k).
+     * @return Signature length, or zero for a moved-from sketch.
+     */
     [[nodiscard]] std::size_t signature_length() const noexcept {
         return hashes_ ? hashes_->size() : 0;
     }
+    /**
+     * @brief Returns the maximum number of pairs in each buffer (ell).
+     * @return Buffer capacity, or zero for a moved-from sketch.
+     */
     [[nodiscard]] std::size_t buffer_capacity() const noexcept { return capacity_; }
+
+    /**
+     * @brief Reports whether signature access and incremental updates are allowed.
+     * @return Ready or NeedsRecovery; an empty set can still be Ready.
+     */
     [[nodiscard]] SketchState state() const noexcept { return state_; }
+
+    /**
+     * @brief Shares the current immutable hash configuration with the caller.
+     * @return An owning shared handle, or null for a moved-from sketch.
+     * @note Passing this handle to another sketch preserves hash compatibility
+     * without copying tables, even if the sketches use different capacities.
+     */
     [[nodiscard]] hash_family_ptr hash_family() const noexcept { return hashes_; }
 
+    /**
+     * @brief Incorporates an element insertion with idempotent set semantics.
+     * @param element Exact element identity inserted into the authoritative set.
+     * @return UpdateResult::Ok; this does not indicate whether the set changed.
+     * @pre The authoritative set has already been updated.
+     * @throws std::logic_error If recovery is required or the sketch is moved-from.
+     * @note Repeated insertion of the same element is harmless. Discard previous
+     * signature views after calling this method.
+     */
     [[nodiscard]] UpdateResult insert(Element element) {
         require_ready();
         insert_unchecked(element);
         return UpdateResult::Ok;
     }
 
+    /**
+     * @brief Incorporates a deletion, ignoring an element that is already absent.
+     * @param element Exact element identity removed from the authoritative set.
+     * @return Ok if no buffer is exhausted; NeedsRecovery otherwise. The result
+     * does not indicate whether the element previously belonged to the set.
+     * @pre The authoritative set has already been updated.
+     * @throws std::logic_error If recovery is required or the sketch is moved-from.
+     * @note On NeedsRecovery, call restore() with the current set after this
+     * deletion, even if that set is empty. Discard previous signature views.
+     */
     [[nodiscard]] UpdateResult erase(Element element) {
         require_ready();
         for (std::size_t i = 0; i < buffers_.size(); ++i) {
@@ -115,9 +240,21 @@ public:
         return UpdateResult::Ok;
     }
 
-    // Read one pass over the authoritative current set, after the triggering
-    // deletion. No reference or copy of the full set is retained. Repeated
-    // elements are harmless. Restore may also replace a ready sketch's set.
+    /**
+     * @brief Rebuilds every buffer from a single pass over an iterator range.
+     * @tparam Iterator Input iterator whose value type is exactly element_type.
+     * @tparam Sentinel End sentinel compatible with Iterator.
+     * @param first Iterator to the first element of the current authoritative set.
+     * @param last Past-the-end sentinel; [first, last) may be empty.
+     * @pre The range is a coherent scan of the set after any fault-triggering
+     * deletion, with no concurrent updates to that scan or this sketch.
+     * @post The sketch is Ready and uses the same hash configuration.
+     * @throws std::logic_error If this is a moved-from, unconfigured sketch.
+     * @note Duplicates are harmless. No full set or reference to the range is
+     * retained. Also usable on a ready sketch to replace its represented set.
+     * Discard previous signature views; unexpected traversal/allocation failures
+     * are outside the supported recovery contract.
+     */
     template<std::input_iterator Iterator, std::sentinel_for<Iterator> Sentinel>
         requires std::same_as<std::iter_value_t<Iterator>, Element>
     void restore(Iterator first, Sentinel last) {
@@ -136,14 +273,31 @@ public:
         state_ = SketchState::Ready;
     }
 
+    /**
+     * @brief Rebuilds every buffer from a single pass over the current set.
+     * @tparam Range Input range whose value type is exactly element_type.
+     * @param elements Coherent current set, including the fault-triggering
+     * deletion. Empty ranges and repeated elements are supported.
+     * @post The sketch is Ready and uses the same hash configuration.
+     * @throws std::logic_error If this is a moved-from, unconfigured sketch.
+     * @note Does not retain the range or copy the entire set. Discard previous
+     * signature views. The same scan and failure contract as the iterator
+     * overload applies; the range must not change during traversal.
+     */
     template<std::ranges::input_range Range>
         requires std::same_as<std::ranges::range_value_t<Range>, Element>
     void restore(Range&& elements) {
         restore(std::ranges::begin(elements), std::ranges::end(elements));
     }
 
-    // Views must not be used after mutation, assignment, move, or destruction.
-    // nullopt means a known empty set, never a fault.
+    /**
+     * @brief Returns a read-only view of the current k-MinHash signature.
+     * @return A span of k hash values, or nullopt for a known empty set.
+     * @throws std::logic_error If recovery is required or the sketch is moved-from.
+     * @note The view borrows internal memory and must not be used after any
+     * mutation, assignment, move, or destruction of this sketch. It performs no
+     * live validity checks. Use copy_signature() to retain an independent value.
+     */
     [[nodiscard]] std::optional<signature_view> signature() const {
         require_ready();
         if (buffers_.front().empty()) {
@@ -152,6 +306,13 @@ public:
         return signature_view{signature_};
     }
 
+    /**
+     * @brief Copies the current signature into independently owned storage.
+     * @return A vector of k hash values, or nullopt for a known empty set.
+     * @throws std::logic_error If recovery is required or the sketch is moved-from.
+     * @note The returned value survives subsequent changes to or destruction of
+     * this sketch. Copying a nonempty signature takes O(k) time and space.
+     */
     [[nodiscard]] std::optional<std::vector<hash_type>> copy_signature() const {
         if (!signature()) {
             return std::nullopt;
@@ -159,6 +320,15 @@ public:
         return signature_;
     }
 
+    /**
+     * @brief Checks whether two sketches use the same ordered hash configuration.
+     * @tparam OtherKind Buffer representation of the other sketch.
+     * @param other Sketch with the same element and concrete hash types.
+     * @return True for shared or value-equal configurations; false if either
+     * sketch is unconfigured. Buffer capacities and represented sets may differ.
+     * @note This checks configuration only, not readiness. It is O(1) for a
+     * shared configuration; otherwise it compares the complete hash parameters.
+     */
     template<BufferKind OtherKind>
     [[nodiscard]] bool compatible_with(const BufferedMinhash<Element, OtherKind, Hash>& other) const {
         const auto other_hashes = other.hash_family();
@@ -204,8 +374,20 @@ private:
     SketchState state_ = SketchState::Ready;
 };
 
-// Comparison is available across buffer strategies, with the same element/hash
-// types. Convention: two empty sets have similarity 1, exactly one empty set 0.
+/**
+ * @brief Estimates Jaccard similarity by comparing corresponding hash values.
+ * @tparam Element Common element identity type.
+ * @tparam Left Buffer strategy of the first sketch.
+ * @tparam Right Buffer strategy of the second sketch.
+ * @tparam Hash Common concrete hash function type.
+ * @param left First sketch, with a compatible hash configuration and ready state.
+ * @param right Second sketch; buffer capacity may differ from left.
+ * @return Fraction of equal coordinates for nonempty sets. By convention,
+ * returns 1 for two empty sets and 0 when exactly one set is empty.
+ * @throws std::invalid_argument If the ordered hash configurations are incompatible.
+ * @throws std::logic_error If configurations are compatible but a sketch needs recovery.
+ * @note Statistical accuracy depends on the chosen hash family and k.
+ */
 template<ElementType Element, BufferKind Left, BufferKind Right, class Hash>
 [[nodiscard]] double similarity(const BufferedMinhash<Element, Left, Hash>& left,
                                 const BufferedMinhash<Element, Right, Hash>& right) {
