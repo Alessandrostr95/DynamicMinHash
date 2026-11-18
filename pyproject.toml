@@ -1,0 +1,19 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=3.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "buffered-minhash"
+version = "0.1.0"
+description = "Buffered MinHash for dynamic sets with explicit recovery"
+readme = "README.md"
+requires-python = ">=3.10"
+
+[tool.scikit-build]
+wheel.packages = []
+install.components = ["python"]
+
+[tool.scikit-build.cmake.define]
+BUFFERED_MINHASH_BUILD_PYTHON = "ON"
+BUFFERED_MINHASH_BUILD_EXAMPLES = "OFF"
+BUILD_TESTING = "OFF"

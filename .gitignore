@@ -1,3 +1,7 @@
 .vscode/
 *.csv
 /build*/
+/.venv/
+__pycache__/
+*.pyc
+/dist/

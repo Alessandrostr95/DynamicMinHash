@@ -43,6 +43,84 @@ find_package(BufferedMinhash CONFIG REQUIRED)
 target_link_libraries(your_target PRIVATE BufferedMinhash::buffered_minhash)
 ```
 
+## Python wrapper (optional)
+
+The pybind11 extension exposes the same update/recovery contract. It requires
+Python 3.10 or newer and a C++20 compiler. Install into a virtual environment:
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install .
+```
+
+The build uses pybind11 and scikit-build-core, following the
+[pybind11 CMake packaging workflow](https://pybind11.readthedocs.io/en/stable/compiling.html).
+They are build dependencies; the installed module has no Python runtime dependencies.
+If both are already installed, `python -m pip install --no-build-isolation .`
+can reuse them without creating an isolated build environment.
+
+```python
+from buffered_minhash import (
+    BufferedMinhash, TreeBufferedMinhash, HashFamily, UpdateResult, similarity,
+)
+
+hashes = HashFamily(k=128, seed=42)
+a = BufferedMinhash(capacity=16, hashes=hashes)
+b = TreeBufferedMinhash(capacity=32, hashes=hashes)
+elements = set()
+
+elements.add(10)
+a.insert(10)
+b.restore(elements)  # also accepts generators
+assert similarity(a, b) == 1.0
+
+elements.discard(10)
+if a.erase(10) == UpdateResult.NeedsRecovery:
+    a.restore(elements)
+assert a.signature() is None
+
+# Or let the sketch construct its hashes:
+c = BufferedMinhash(k=128, capacity=16, seed=42)  # seed is optional
+```
+
+| Element domain | Array buffers | Tree buffers | Shared hashes |
+| --- | --- | --- | --- |
+| uint32_t | `BufferedMinhash` | `TreeBufferedMinhash` | `HashFamily` |
+| uint64_t | `BufferedMinhash64` | `TreeBufferedMinhash64` | `HashFamily64` |
+
+Both widths use 64-bit tabulation hash outputs. The initial binding exposes these
+built-in hashes, not arbitrary Python hash callbacks or other C++ hash types.
+Methods include `insert`, `erase`, `restore`, `signature`, `copy_signature`,
+`state`, `hash_family`, `signature_length`, `buffer_capacity`, `compatible_with`,
+and `copy`. Python's `copy.copy` also creates independent buffers sharing hashes.
+Docstrings and parameter names are available through `help()`.
+
+Unlike the C++ view, Python `signature()` returns an **independent list**, or
+`None` for a known empty set. Invalid state raises `RuntimeError`; invalid
+configuration or incompatible similarity raises `ValueError`. Elements must
+support integer indexing and fit the selected unsigned width: negative or
+out-of-range values raise `OverflowError`, and bools/floats/strings raise
+`TypeError`. The authoritative set remains the application's responsibility.
+
+`restore` consumes an iterable once without materializing the full set. If an
+element conversion or iteration fails after reconstruction starts, it propagates
+the Python exception and leaves the sketch requiring recovery; retry with a valid
+complete iterable. Iterators must not reenter or modify the same sketch. The
+wrapper retains the GIL and does not promise concurrent updates.
+
+To build the optional extension directly and run Python plus C++ correctness tests
+(with pybind11 installed for the chosen interpreter):
+
+```sh
+cmake -S . -B build-python -DCMAKE_BUILD_TYPE=Release \
+  -DBUFFERED_MINHASH_BUILD_PYTHON=ON
+cmake --build build-python
+ctest --test-dir build-python --output-on-failure
+```
+
+Ordinary C++ builds leave `BUFFERED_MINHASH_BUILD_PYTHON=OFF` and do not require
+Python or pybind11. Binding-specific checks are in [tests/test_python.py](tests/test_python.py).
+
 ## Shared hashes and construction
 
 ```cpp

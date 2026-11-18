@@ -7,6 +7,7 @@ include(CTest)
 
 option(BUFFERED_MINHASH_BUILD_EXAMPLES "Build the recovery example" ON)
 option(BUFFERED_MINHASH_ENABLE_SANITIZERS "Enable ASan/UBSan on tests and examples" OFF)
+option(BUFFERED_MINHASH_BUILD_PYTHON "Build the optional pybind11 Python module" OFF)
 
 add_library(buffered_minhash INTERFACE)
 add_library(BufferedMinhash::buffered_minhash ALIAS buffered_minhash)
@@ -40,6 +41,26 @@ if(BUFFERED_MINHASH_BUILD_EXAMPLES)
     buffered_minhash_configure_executable(buffered_minhash_example)
     if(BUILD_TESTING)
         add_test(NAME buffered_minhash.example COMMAND buffered_minhash_example)
+    endif()
+endif()
+
+if(BUFFERED_MINHASH_BUILD_PYTHON)
+    find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+    execute_process(COMMAND "${Python_EXECUTABLE}" -m pybind11 --cmakedir
+        OUTPUT_VARIABLE pybind11_cmake_dir OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    find_package(pybind11 3.0 CONFIG REQUIRED HINTS "${pybind11_cmake_dir}")
+    pybind11_add_module(buffered_minhash_python MODULE python/bindings.cpp)
+    target_link_libraries(buffered_minhash_python PRIVATE BufferedMinhash::buffered_minhash)
+    set_target_properties(buffered_minhash_python PROPERTIES
+        OUTPUT_NAME buffered_minhash CXX_EXTENSIONS OFF)
+    install(TARGETS buffered_minhash_python
+        LIBRARY DESTINATION . COMPONENT python
+        RUNTIME DESTINATION . COMPONENT python)
+    if(BUILD_TESTING)
+        add_test(NAME buffered_minhash.python
+            COMMAND "${Python_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_python.py"
+                    "$<TARGET_FILE_DIR:buffered_minhash_python>")
     endif()
 endif()
 
