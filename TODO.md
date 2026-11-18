@@ -8,7 +8,7 @@ unchecked items are follow-up work. Historical implementations are preserved in
 
 ## Current scope and priorities
 
-Implement the general library first. Add new correctness tests alongside the
+The general library and legal-stream specialization are implemented. Add new correctness tests alongside the
 implementation; performance benchmarks and statistical experiments belong to a
 later phase and are not prerequisites for implementation. The paper supplies the
 algorithmic proof; tests check that the code implements that algorithm correctly.
@@ -48,16 +48,27 @@ core sketch; the core does not retain a pointer to an application container.
   deletions with set semantics. Store element identities alongside hash values
   and use consistent ordering for buffer entries and thresholds.
 - [x] Verify correctness during implementation.
-- [ ] In a later experimental phase, benchmark the general implementation before
-  deciding whether to develop a specialized legal-stream variant.
-- [ ] If warranted, build a legal-stream prototype for comparison, potentially
-  reusing the existing implementations. Include this specialization in the
-  library only if realistic benchmarks demonstrate meaningful time or memory
-  benefits; otherwise retain only the general variant.
-
-There is no initial commitment to maintain two complete implementations. If a
-legal-stream specialization is adopted, share common buffer/recovery logic where
-practical and expose its stricter update contract clearly.
+- [x] Implement the legal-stream specialization now, as subsequently requested,
+  with array and tree buffers and the same public API and recovery protocol.
+  `LegalBufferedMinhash` selects a compile-time storage/semantics policy in the
+  shared implementation; the default `BufferedMinhash` remains general.
+- [x] Store only hashes and retain collision multiplicities for legal streams.
+  Skip duplicate search for arrays; use a multiset and erase one occurrence for
+  trees. Finite legal thresholds are hashes, with nullopt still meaning infinity.
+- [x] Document unchecked legal-stream preconditions: insert absent elements,
+  erase present elements, and restore from distinct elements. Reinsertion after
+  deletion is allowed. Violations may silently produce incorrect signatures.
+- [x] Share hash families and support comparisons across general/legal and
+  array/tree variants. Cover both element widths and both C++ hash output widths.
+- [x] Test forced collisions, multiplicities, retained thresholds, conservative
+  early recovery, empty/maximal values, one-pass restore, and copy/move behavior.
+  Compare with recomputed signatures over exhaustive legal streams and seeded
+  randomized streams; restore each variant independently when needed.
+- [x] Expose legal array/tree classes for uint32_t and uint64_t in Python, with
+  docstrings, shared hash families, all comparison combinations, and binding tests.
+- [ ] In the experimental phase, compare general and legal variants on realistic
+  workloads: time, actual memory, fault frequency and total recovery cost. Use
+  these results to decide whether to maintain the specialization long-term.
 
 ## Agreed: public interface and shared hash configuration
 
@@ -100,8 +111,9 @@ practical and expose its stricter update contract clearly.
   and `uint64_t`, with `uint32_t` as the default.
 - [x] Keep `element_type` distinct from `hash_type`. Use 64-bit hash outputs by
   default, with the output type determined by the hash configuration.
-- [x] Preserve exact element identity in buffer entries, independently of hash
-  collisions. Do not initially support arbitrary objects, floating-point types,
+- [x] Preserve exact element identity in general buffer entries, independently of
+  hash collisions; legal variants retain only hashes and their multiplicities.
+  Do not initially support arbitrary objects, floating-point types,
   or signed integers; these require separately defined contracts if added later.
 - [x] Represent empty buffers and infinite thresholds explicitly, without
   reserving maximum integer values as sentinels. All representable element and
@@ -117,8 +129,9 @@ practical and expose its stricter update contract clearly.
   buffers. Do not fill unused entries with sentinel hashes or add an optional
   wrapper to every buffer slot.
 - [x] Represent a threshold as `std::optional<Entry>`, where `Entry` contains the
-  hash and element identity and `nullopt` means positive infinity. Compare finite
-  entries lexicographically by hash, then element. Defer metadata/padding
+  hash and element identity for general streams, or only the hash for legal
+  streams. `nullopt` means positive infinity. Compare general finite entries
+  lexicographically by hash, then element. Defer metadata/padding
   measurements to the experimental phase.
 - [x] Preserve thresholds across deletions. A buffer below capacity can retain a
   finite threshold; never infer infinity from its current size. Initialize or

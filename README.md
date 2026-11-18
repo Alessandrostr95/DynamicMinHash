@@ -1,9 +1,10 @@
 # BufferedMinhash
 
-A C++20, header-only implementation of the general **ell-buffered k-MinHash**
-sketch. Both array and tree buffers support set updates, including redundant
-insertions and deletion of absent elements. The application owns the underlying
-set; the sketch stores bounded buffers and requests explicit recovery when needed.
+A C++20, header-only implementation of the **ell-buffered k-MinHash** sketch.
+Both array and tree buffers support general set updates, including redundant
+insertions and deletion of absent elements. Specialized legal-stream variants
+store only hashes when the caller guarantees nonredundant updates. The application
+owns the underlying set; sketches request explicit recovery when needed.
 
 The algorithm is described in [Maintaining k-MinHash Signatures over Fully-Dynamic
 Data Streams with Recovery](https://arxiv.org/abs/2407.21614). The original
@@ -83,10 +84,12 @@ assert a.signature() is None
 c = BufferedMinhash(k=128, capacity=16, seed=42)  # seed is optional
 ```
 
-| Element domain | Array buffers | Tree buffers | Shared hashes |
-| --- | --- | --- | --- |
-| uint32_t | `BufferedMinhash` | `TreeBufferedMinhash` | `HashFamily` |
-| uint64_t | `BufferedMinhash64` | `TreeBufferedMinhash64` | `HashFamily64` |
+| Update contract | Element domain | Array buffers | Tree buffers | Shared hashes |
+| --- | --- | --- | --- | --- |
+| General | uint32_t | `BufferedMinhash` | `TreeBufferedMinhash` | `HashFamily` |
+| General | uint64_t | `BufferedMinhash64` | `TreeBufferedMinhash64` | `HashFamily64` |
+| Legal | uint32_t | `LegalBufferedMinhash` | `LegalTreeBufferedMinhash` | `HashFamily` |
+| Legal | uint64_t | `LegalBufferedMinhash64` | `LegalTreeBufferedMinhash64` | `HashFamily64` |
 
 Both widths use 64-bit tabulation hash outputs. The initial binding exposes these
 built-in hashes, not arbitrary Python hash callbacks or other C++ hash types.
@@ -94,6 +97,10 @@ Methods include `insert`, `erase`, `restore`, `signature`, `copy_signature`,
 `state`, `hash_family`, `signature_length`, `buffer_capacity`, `compatible_with`,
 and `copy`. Python's `copy.copy` also creates independent buffers sharing hashes.
 Docstrings and parameter names are available through `help()`.
+Legal variants have the same methods and constructors; their stricter update and
+restore preconditions are described [below](#legal-stream-specialization).
+All four classes for a given element width can share a hash family and compare
+signatures with each other using `compatible_with` and `similarity`.
 
 Unlike the C++ view, Python `signature()` returns an **independent list**, or
 `None` for a known empty set. Invalid state raises `RuntimeError`; invalid
@@ -182,7 +189,8 @@ Include `<unordered_set>` when using this example. A complete executable is in
   current set after the triggering deletion, using the same hash functions. Input
   must be a coherent snapshot/scan relative to updates. The input is traversed
   once and is neither retained nor copied into a full internal set. Repeated input
-  elements are harmless. Iterator/range value types must match `element_type`.
+  elements are harmless in general variants; legal variants require distinct
+  input elements. Iterator/range value types must match `element_type`.
 - Restore also accepts an empty set and may replace the represented set while the
   sketch is ready. Individual sketches require external synchronization; shared
   hash configurations must support concurrent const evaluation if used by threads.
@@ -191,11 +199,66 @@ Include `<unordered_set>` when using this example. A complete executable is in
   recovery contract for unexpected exceptions. API argument/state errors are
   checked separately; robust unexpected-exception handling is future work.
 
-Array and tree buffers hold distinct `(hash, element)` pairs in lexicographic
+General array and tree buffers hold distinct `(hash, element)` pairs in lexicographic
 order (the array's physical storage is unordered). Each threshold is an optional
 pair: absence means infinity. Deletions retain thresholds even when a buffer is
 no longer full. A buffered element's deletion can therefore cause recovery later,
 without admitting previously discarded elements above the retained threshold.
+
+## Legal-stream specialization
+
+Use `LegalBufferedMinhash` when the application guarantees **legal set updates**:
+insert an element only when it was absent, and erase it only when it was present.
+Reinsertion after deletion is allowed. `restore` must enumerate each current
+element **exactly once**, including when given a generator or input iterator.
+These membership/uniqueness preconditions are **not checked**; violating them
+can silently produce incorrect signatures. No internal membership set is kept.
+
+```cpp
+// Same header, hash-family type, constructors and recovery API as the general variant.
+LegalBufferedMinhash<> legal_array(16, hashes);
+LegalBufferedMinhash<std::uint32_t, BufferKind::Tree> legal_tree(16, hashes);
+```
+
+The alias selects `StreamKind::Legal` as the fourth compile-time parameter of
+`BufferedMinhash`; the default remains `StreamKind::General`. Both contracts
+share the update, signature and recovery implementation, without a runtime mode
+branch. Legal buffers and finite thresholds store only hash values. Arrays omit
+the insertion duplicate search; trees use `std::multiset`. Equal hashes from
+distinct elements retain multiplicities, and a deletion removes just one
+occurrence. No hash value is reserved for an empty buffer or infinite threshold.
+
+Truncating a collision bucket at the threshold loses element identities. Deleting
+any element tied at that threshold consumes one stored occurrence, even if its
+identity would have been discarded by a general buffer. This can cause earlier,
+conservative recovery. It does not change the minimum hash while the sketch is
+Ready under the legal contract. Recover each sketch independently; do not assume
+that general and legal variants fault on the same update.
+
+```python
+from buffered_minhash import LegalBufferedMinhash, LegalTreeBufferedMinhash
+
+legal = LegalBufferedMinhash(capacity=16, hashes=hashes)
+peer = LegalTreeBufferedMinhash(capacity=16, hashes=hashes)
+elements = set()
+
+value = 10
+if value not in elements:
+    elements.add(value)
+    legal.insert(value)
+peer.restore(elements)  # sets enumerate distinct elements
+assert similarity(legal, peer) == 1.0
+
+if value in elements:
+    elements.remove(value)
+    if legal.erase(value) == UpdateResult.NeedsRecovery:
+        legal.restore(elements)
+```
+
+Element/hash widths, fault-state guards, copy/move behavior and hash-family
+sharing match the general API. The specialization removes identity storage and
+duplicate checks; end-to-end time and memory benefits, including recovery cost,
+remain to be measured in the experimental phase.
 
 ## Signatures and similarity
 
@@ -215,7 +278,7 @@ A signature view is read-only and must not be used after any mutation, assignmen
 move, or destruction of its sketch. Use `copy_signature` for an independent value.
 Previously obtained views do not carry a live validity check.
 
-`compatible_with` and `similarity` support different buffer kinds and capacities,
+`compatible_with` and `similarity` support different buffer kinds, update contracts and capacities,
 with the same element/hash types. Compatibility requires the same ordered hash
 configuration, not just the same `k`. Sharing the configuration enables a pointer
 identity check; separately constructed configurations compare their full hash
@@ -265,5 +328,5 @@ new statistical validation or a proof of those assumptions for tabulation hashin
 - [legacy/](legacy/): original sketches and experimental code, preserved for reference.
 - [TODO.md](TODO.md): agreed design, implementation status, and deferred work.
 
-Performance/statistical experiments, a legal-stream specialization, smaller
-element types, and unexpected-exception robustness are deferred.
+Performance/statistical experiments, smaller element types, and
+unexpected-exception robustness are deferred.

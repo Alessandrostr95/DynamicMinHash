@@ -82,14 +82,15 @@ void bind_family(py::module_& module, const char* name) {
 template<class Element, bmh::BufferKind Kind>
 using Sketch = bmh::BufferedMinhash<Element, Kind>;
 
-template<class Element, bmh::BufferKind Kind>
-void bind_sketch(py::class_<Sketch<Element, Kind>>& cls) {
-    using S = Sketch<Element, Kind>;
+template<class S>
+void bind_sketch(py::class_<S>& cls) {
+    using Element = typename S::element_type;
     using Family = PythonHashFamily<Element>;
+    constexpr bool legal = S::stream_kind == bmh::StreamKind::Legal;
     cls.def(py::init([](std::size_t k, std::size_t capacity, std::optional<std::uint64_t> seed) {
             return seed ? S(k, capacity, *seed) : S(k, capacity);
         }), py::arg("k"), py::arg("capacity"), py::arg("seed") = py::none(),
-        "Create an empty sketch with k hashes and capacity pairs per buffer. Both must be positive.")
+        "Create an empty sketch with k hashes and capacity entries per buffer. Both must be positive.")
        .def(py::init([](std::size_t capacity, const Family& hashes) {
             return S(capacity, hashes.value);
         }), py::arg("capacity"), py::arg("hashes"),
@@ -97,22 +98,25 @@ void bind_sketch(py::class_<Sketch<Element, Kind>>& cls) {
        .def("insert", [](S& self, py::handle element) {
             return self.insert(checked_element<Element>(element));
         }, py::arg("element"),
-        "Insert after updating the external set. Duplicates are harmless. Returns UpdateResult.Ok.")
+        legal ? "Insert an element that was absent before updating the external set. Unchecked precondition; returns UpdateResult.Ok."
+              : "Insert after updating the external set. Duplicates are harmless. Returns UpdateResult.Ok.")
        .def("erase", [](S& self, py::handle element) {
             return self.erase(checked_element<Element>(element));
         }, py::arg("element"),
-        "Delete after updating the external set. Returns NeedsRecovery if a buffer empties; then call restore.")
+        legal ? "Delete an element that was present before updating the external set (unchecked). Returns NeedsRecovery if a buffer empties; then call restore."
+              : "Delete after updating the external set; absent elements are harmless. Returns NeedsRecovery if a buffer empties; then call restore.")
        .def("restore", [](S& self, py::iterable elements) {
             self.restore(ElementIterator<Element>{py::iter(elements)}, std::default_sentinel);
         }, py::arg("elements"),
-        "Rebuild from the current set in one pass. Accepts generators, duplicates and empty iterables; retains hashes.")
+        legal ? "Rebuild from the current set in one pass. Requires distinct elements (unchecked); accepts generators and empty iterables; retains hashes."
+              : "Rebuild from the current set in one pass. Accepts generators, duplicates and empty iterables; retains hashes.")
        .def("signature", &S::copy_signature,
         "Return an independent list of hash values, or None for a known empty set. Raises RuntimeError on fault.")
        .def("copy_signature", &S::copy_signature,
         "Return an independent signature list, or None. Equivalent to signature() in Python.")
        .def("state", &S::state, "Return SketchState.Ready or SketchState.NeedsRecovery.")
        .def("signature_length", &S::signature_length, "Return the number of hash functions k.")
-       .def("buffer_capacity", &S::buffer_capacity, "Return the maximum pairs per buffer (ell).")
+       .def("buffer_capacity", &S::buffer_capacity, "Return the maximum entries per buffer (ell).")
        .def("hash_family", [](const S& self) { return Family{self.hash_family()}; },
         "Return a shared immutable hash configuration; no hash tables are copied.")
        .def("copy", [](const S& self) { return S(self); },
@@ -120,30 +124,42 @@ void bind_sketch(py::class_<Sketch<Element, Kind>>& cls) {
        .def("__copy__", [](const S& self) { return S(self); });
 }
 
-template<class Element, bmh::BufferKind Left, bmh::BufferKind Right>
-void bind_comparison(py::module_& module, py::class_<Sketch<Element, Left>>& cls) {
-    cls.def("compatible_with", [](const Sketch<Element, Left>& self, const Sketch<Element, Right>& other) {
+template<class Left, class Right>
+void bind_comparison(py::module_& module, py::class_<Left>& cls) {
+    cls.def("compatible_with", [](const Left& self, const Right& other) {
         return self.compatible_with(other);
     }, py::arg("other"), "Check ordered hash configuration equality, independently of readiness or buffer capacity.");
-    module.def("similarity", [](const Sketch<Element, Left>& left, const Sketch<Element, Right>& right) {
+    module.def("similarity", [](const Left& left, const Right& right) {
         return bmh::similarity(left, right);
     }, py::arg("left"), py::arg("right"),
     "Compare compatible ready signatures. Two empty sets give 1; one empty gives 0. Incompatibility raises ValueError.");
 }
 
+template<class Left, class... Right>
+void bind_comparisons(py::module_& module, py::class_<Left>& cls, const py::class_<Right>&...) {
+    (bind_comparison<Left, Right>(module, cls), ...);
+}
+
 template<class Element>
-void bind_width(py::module_& module, const char* family_name, const char* array_name, const char* tree_name) {
+void bind_width(py::module_& module, const char* family_name, const char* array_name, const char* tree_name,
+                const char* legal_array_name, const char* legal_tree_name) {
     bind_family<Element>(module, family_name);
     py::class_<Sketch<Element, bmh::BufferKind::Array>> array(module, array_name,
         "General-stream buffered MinHash with array buffers. The application owns the set.");
     py::class_<Sketch<Element, bmh::BufferKind::Tree>> tree(module, tree_name,
         "General-stream buffered MinHash with tree buffers. The application owns the set.");
+    py::class_<bmh::LegalBufferedMinhash<Element>> legal_array(module, legal_array_name,
+        "Legal-stream buffered MinHash storing only hashes in array buffers. Insert only absent elements, erase only present elements, and restore distinct elements. Preconditions are unchecked; violations can silently corrupt signatures.");
+    py::class_<bmh::LegalBufferedMinhash<Element, bmh::BufferKind::Tree>> legal_tree(module, legal_tree_name,
+        "Legal-stream buffered MinHash storing hash multiplicities in tree buffers. Insert only absent elements, erase only present elements, and restore distinct elements. Preconditions are unchecked; violations can silently corrupt signatures.");
     bind_sketch(array);
     bind_sketch(tree);
-    bind_comparison<Element, bmh::BufferKind::Array, bmh::BufferKind::Array>(module, array);
-    bind_comparison<Element, bmh::BufferKind::Array, bmh::BufferKind::Tree>(module, array);
-    bind_comparison<Element, bmh::BufferKind::Tree, bmh::BufferKind::Array>(module, tree);
-    bind_comparison<Element, bmh::BufferKind::Tree, bmh::BufferKind::Tree>(module, tree);
+    bind_sketch(legal_array);
+    bind_sketch(legal_tree);
+    bind_comparisons(module, array, array, tree, legal_array, legal_tree);
+    bind_comparisons(module, tree, array, tree, legal_array, legal_tree);
+    bind_comparisons(module, legal_array, array, tree, legal_array, legal_tree);
+    bind_comparisons(module, legal_tree, array, tree, legal_array, legal_tree);
 }
 
 } // namespace
@@ -157,6 +173,8 @@ PYBIND11_MODULE(buffered_minhash, module) {
     py::enum_<bmh::SketchState>(module, "SketchState", "Whether updates and signature access are allowed.")
         .value("Ready", bmh::SketchState::Ready)
         .value("NeedsRecovery", bmh::SketchState::NeedsRecovery);
-    bind_width<std::uint32_t>(module, "HashFamily", "BufferedMinhash", "TreeBufferedMinhash");
-    bind_width<std::uint64_t>(module, "HashFamily64", "BufferedMinhash64", "TreeBufferedMinhash64");
+    bind_width<std::uint32_t>(module, "HashFamily", "BufferedMinhash", "TreeBufferedMinhash",
+                              "LegalBufferedMinhash", "LegalTreeBufferedMinhash");
+    bind_width<std::uint64_t>(module, "HashFamily64", "BufferedMinhash64", "TreeBufferedMinhash64",
+                              "LegalBufferedMinhash64", "LegalTreeBufferedMinhash64");
 }

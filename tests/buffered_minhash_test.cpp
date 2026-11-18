@@ -275,38 +275,205 @@ void configuration_cases() {
     check_signature(wide_input, {value});
 }
 
-// Exhaust every length-6 update stream on a three-element universe. This covers
-// legal and non-legal streams, collisions, and frequent recovery deterministically.
-template<BufferKind Kind>
+// Exhaust all length-6 general or length-9 legal streams on three elements.
+// Each collision pattern runs separately so a constant hash cannot mask a bug
+// in another buffer by always triggering an earlier recovery.
+template<BufferKind Kind, StreamKind Stream = StreamKind::General>
 void exhaustive_cases() {
     using Hash = TestHash<std::uint32_t>;
-    using Sketch = BufferedMinhash<std::uint32_t, Kind, Hash>;
-    const auto hashes = family<Hash>({Hash{}, Hash{1, 0}, Hash{3, 3}});
-    for (std::size_t capacity : {1u, 2u, 3u}) {
-        auto visit = [&](auto&& self, const Sketch& sketch,
-                         const std::set<std::uint32_t>& elements, int depth) -> void {
-            check_signature(sketch, elements);
-            if (depth == 0) {
-                return;
-            }
-            for (std::uint32_t value = 0; value < 3; ++value) {
-                for (bool insertion : {false, true}) {
-                    Sketch next(sketch);
-                    auto expected = elements;
-                    if (insertion) {
-                        expected.insert(value);
-                        CHECK(next.insert(value) == UpdateResult::Ok);
-                    } else {
-                        expected.erase(value);
-                        if (next.erase(value) == UpdateResult::NeedsRecovery) {
-                            next.restore(expected);
-                        }
-                    }
-                    self(self, next, expected, depth - 1);
+    using Sketch = BufferedMinhash<std::uint32_t, Kind, Hash, Stream>;
+    const std::vector<std::vector<Hash>> configurations = Stream == StreamKind::Legal
+        ? std::vector<std::vector<Hash>>{{Hash{}}, {Hash{0, 0}}, {Hash{1, 0}},
+                                        {Hash{1, 1}}, {Hash{}, Hash{1, 0}, Hash{3, 3}}}
+        : std::vector<std::vector<Hash>>{{Hash{}, Hash{1, 0}, Hash{3, 3}}};
+    for (const auto& configuration : configurations) {
+        const auto hashes = family<Hash>(configuration);
+        for (std::size_t capacity : {1u, 2u, 3u}) {
+            auto visit = [&](auto&& self, const Sketch& sketch,
+                             const std::set<std::uint32_t>& elements, int depth) -> void {
+                check_signature(sketch, elements);
+                if (depth == 0) {
+                    return;
                 }
+                for (std::uint32_t value = 0; value < 3; ++value) {
+                    for (bool insertion : {false, true}) {
+                        if constexpr (Stream == StreamKind::Legal) {
+                            if (insertion == elements.contains(value)) { continue; }
+                        }
+                        Sketch next(sketch);
+                        auto expected = elements;
+                        if (insertion) {
+                            expected.insert(value);
+                            CHECK(next.insert(value) == UpdateResult::Ok);
+                        } else {
+                            expected.erase(value);
+                            if (next.erase(value) == UpdateResult::NeedsRecovery) {
+                                next.restore(expected);
+                            }
+                        }
+                        self(self, next, expected, depth - 1);
+                    }
+                }
+            };
+            visit(visit, Sketch(capacity, hashes), {}, Stream == StreamKind::Legal ? 9 : 6);
+        }
+    }
+}
+
+template<BufferKind Kind, ElementType Element, HashValueType Value>
+void legal_deterministic_cases() {
+    using Hash = TestHash<Element, Value>;
+    using Sketch = LegalBufferedMinhash<Element, Kind, Hash>;
+    static_assert(Sketch::stream_kind == StreamKind::Legal);
+    const auto hashes = family<Hash>({Hash{}});
+    Sketch sketch(2, hashes);
+    check_signature(sketch, {});
+
+    // A partial buffer keeps its old finite threshold. Above-threshold new
+    // elements stay excluded; values between current max and threshold enter.
+    sketch.restore(std::vector<Element>{1, 2, 3});
+    CHECK(sketch.erase(2) == UpdateResult::Ok);
+    CHECK(sketch.insert(4) == UpdateResult::Ok);
+    CHECK(sketch.erase(1) == UpdateResult::NeedsRecovery);
+    check_throws<std::logic_error>([&] { (void)sketch.signature(); });
+    check_throws<std::logic_error>([&] { (void)sketch.copy_signature(); });
+    check_throws<std::logic_error>([&] { (void)sketch.insert(5); });
+    check_throws<std::logic_error>([&] { (void)sketch.erase(3); });
+    Sketch fault_copy(sketch);
+    sketch.restore(std::vector<Element>{3, 4});
+    check_signature(sketch, {3, 4});
+    CHECK(fault_copy.state() == SketchState::NeedsRecovery);
+    fault_copy.restore(std::vector<Element>{});
+    check_signature(fault_copy, {});
+
+    sketch.restore(std::vector<Element>{2, 8, 10});
+    CHECK(sketch.erase(8) == UpdateResult::Ok);
+    CHECK(sketch.insert(5) == UpdateResult::Ok);
+    CHECK(sketch.erase(2) == UpdateResult::Ok);
+    check_signature(sketch, {5, 10});
+    CHECK(sketch.insert(2) == UpdateResult::Ok); // Reinsertion is legal.
+    check_signature(sketch, {2, 5, 10});
+
+    // Equal hashes are distinct occurrences, even though identities are absent.
+    const auto collisions = family<Hash>({Hash{Value{0}, Value{0}}});
+    Sketch colliding(3, collisions);
+    colliding.restore(std::vector<Element>{1, 2, 3});
+    CHECK(colliding.erase(2) == UpdateResult::Ok);
+    CHECK(colliding.erase(1) == UpdateResult::Ok);
+    check_signature(colliding, {3});
+    CHECK(colliding.insert(2) == UpdateResult::Ok);
+    CHECK(colliding.erase(3) == UpdateResult::Ok);
+    check_signature(colliding, {2});
+    CHECK(colliding.erase(2) == UpdateResult::NeedsRecovery);
+    colliding.restore(std::vector<Element>{});
+    check_signature(colliding, {});
+
+    // An unretained element tied at the threshold consumes one stored hash.
+    // This causes a conservative early fault, not an incorrect ready signature.
+    Sketch compact(2, collisions);
+    BufferedMinhash<Element, Kind, Hash> general(2, collisions);
+    compact.restore(std::vector<Element>{1, 2, 3});
+    general.restore(std::vector<Element>{1, 2, 3});
+    CHECK(compact.erase(3) == UpdateResult::Ok);
+    CHECK(general.erase(3) == UpdateResult::Ok);
+    check_signature(compact, {1, 2});
+    CHECK(compact.erase(1) == UpdateResult::NeedsRecovery);
+    CHECK(general.erase(1) == UpdateResult::Ok);
+    check_throws<std::logic_error>([&] { (void)similarity(general, compact); });
+    compact.restore(std::vector<Element>{2});
+    CHECK(similarity(compact, general) == 1.0);
+    CHECK(similarity(general, compact) == 1.0);
+
+    // A truncated collision bucket cannot yield a stale smaller minimum after
+    // every element of that bucket is deleted: a fault must happen first.
+    const auto parity = family<Hash>({Hash{Value{1}, Value{0}}});
+    Sketch tied(2, parity);
+    std::set<Element> remaining{0, 2, 4, 1};
+    tied.restore(remaining);
+    CHECK(tied.erase(4) == UpdateResult::Ok);
+    remaining.erase(4);
+    check_signature(tied, remaining);
+    CHECK(tied.erase(2) == UpdateResult::NeedsRecovery);
+    remaining.erase(2);
+    tied.restore(remaining);
+    CHECK(tied.erase(0) == UpdateResult::Ok);
+    check_signature(tied, {1});
+
+    // No sentinel values: maximum hash and element values are ordinary data.
+    const auto maximum = std::numeric_limits<Element>::max();
+    sketch.restore(std::vector<Element>{0, maximum});
+    CHECK(sketch.erase(0) == UpdateResult::Ok);
+    check_signature(sketch, {maximum});
+    CHECK(sketch.erase(maximum) == UpdateResult::NeedsRecovery);
+    Sketch max_hash(1, family<Hash>({Hash{std::numeric_limits<Value>::max(),
+                                             std::numeric_limits<Value>::max()}}));
+    CHECK(max_hash.insert(0) == UpdateResult::Ok);
+    CHECK((*max_hash.signature())[0] == std::numeric_limits<Value>::max());
+    CHECK(max_hash.erase(0) == UpdateResult::NeedsRecovery);
+
+    // One-pass restore, copy/move semantics and hash ownership match general mode.
+    std::istringstream input("7 2 11");
+    sketch.restore(std::istream_iterator<Element>{input}, std::istream_iterator<Element>{});
+    check_signature(sketch, {2, 7, 11});
+    CHECK(sketch.hash_family() == hashes);
+    Sketch copied(sketch);
+    CHECK(copied.erase(2) == UpdateResult::Ok);
+    check_signature(copied, {7, 11});
+    check_signature(sketch, {2, 7, 11});
+    Sketch assigned(1, hashes);
+    assigned = sketch;
+    CHECK(assigned.buffer_capacity() == 2);
+    CHECK(assigned.erase(2) == UpdateResult::Ok);
+    check_signature(sketch, {2, 7, 11});
+    Sketch moved(std::move(copied));
+    check_signature(moved, {7, 11});
+    CHECK(copied.state() == SketchState::NeedsRecovery);
+    check_throws<std::logic_error>([&] { copied.restore(std::vector<Element>{}); });
+    assigned = std::move(moved);
+    CHECK(moved.state() == SketchState::NeedsRecovery);
+    check_signature(assigned, {7, 11});
+
+    // Fault in a later coordinate must block reads until every buffer is rebuilt.
+    Sketch multi(1, family<Hash>({Hash{}, Hash{Value{15}, Value{15}}, Hash{}}));
+    multi.restore(std::vector<Element>{1, 2});
+    CHECK(multi.erase(2) == UpdateResult::NeedsRecovery);
+    multi.restore(std::vector<Element>{1});
+    check_signature(multi, {1});
+}
+
+template<ElementType Element, class Hash>
+void legal_randomized_cases(std::shared_ptr<const HashFamily<Hash>> hashes) {
+    for (std::size_t capacity : {1u, 2u, 7u, 128u}) {
+        LegalBufferedMinhash<Element, BufferKind::Array, Hash> array(capacity, hashes);
+        LegalBufferedMinhash<Element, BufferKind::Tree, Hash> tree(capacity, hashes);
+        BufferedMinhash<Element, BufferKind::Array, Hash> general_array(capacity, hashes);
+        BufferedMinhash<Element, BufferKind::Tree, Hash> general_tree(capacity, hashes);
+        std::set<Element> elements;
+        std::mt19937_64 generator(1234 + capacity);
+        for (std::size_t step = 0; step < 2500; ++step) {
+            Element value = static_cast<Element>(generator() % 64);
+            if (step % 11 == 0) {
+                value = static_cast<Element>(std::numeric_limits<Element>::max() - value);
             }
-        };
-        visit(visit, Sketch(capacity, hashes), {}, 6);
+            const bool inserting = !elements.contains(value);
+            if (inserting) { elements.insert(value); }
+            else { elements.erase(value); }
+            auto update = [&](auto& sketch) {
+                if (inserting) { CHECK(sketch.insert(value) == UpdateResult::Ok); }
+                else if (sketch.erase(value) == UpdateResult::NeedsRecovery) {
+                    sketch.restore(elements);
+                }
+                check_signature(sketch, elements);
+            };
+            // Fault timing is allowed to differ between contracts.
+            update(array);
+            update(tree);
+            update(general_array);
+            update(general_tree);
+            CHECK(similarity(array, general_tree) == 1.0);
+            CHECK(similarity(general_array, tree) == 1.0);
+            CHECK(array.copy_signature() == tree.copy_signature());
+        }
     }
 }
 
@@ -356,10 +523,23 @@ int main() {
         configuration_cases();
         exhaustive_cases<BufferKind::Array>();
         exhaustive_cases<BufferKind::Tree>();
+        legal_deterministic_cases<BufferKind::Array, std::uint32_t, std::uint32_t>();
+        legal_deterministic_cases<BufferKind::Tree, std::uint32_t, std::uint32_t>();
+        legal_deterministic_cases<BufferKind::Array, std::uint32_t, std::uint64_t>();
+        legal_deterministic_cases<BufferKind::Tree, std::uint32_t, std::uint64_t>();
+        legal_deterministic_cases<BufferKind::Array, std::uint64_t, std::uint32_t>();
+        legal_deterministic_cases<BufferKind::Tree, std::uint64_t, std::uint32_t>();
+        legal_deterministic_cases<BufferKind::Array, std::uint64_t, std::uint64_t>();
+        legal_deterministic_cases<BufferKind::Tree, std::uint64_t, std::uint64_t>();
+        exhaustive_cases<BufferKind::Array, StreamKind::Legal>();
+        exhaustive_cases<BufferKind::Tree, StreamKind::Legal>();
         randomized_cases<std::uint32_t>(make_hash_family<>(5, 42));
         randomized_cases<std::uint64_t>(make_hash_family<std::uint64_t>(5, 42));
         using Colliding = TestHash<std::uint32_t>;
         randomized_cases<std::uint32_t>(family<Colliding>({Colliding{3, 0}, Colliding{1, 1}}));
+        legal_randomized_cases<std::uint32_t>(make_hash_family<>(5, 42));
+        legal_randomized_cases<std::uint64_t>(make_hash_family<std::uint64_t>(5, 42));
+        legal_randomized_cases<std::uint32_t>(family<Colliding>({Colliding{3, 0}, Colliding{1, 1}}));
         std::cout << "All BufferedMinhash correctness checks passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

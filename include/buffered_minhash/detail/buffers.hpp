@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <iterator>
 #include <set>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -30,17 +31,19 @@ struct Entry {
 };
 
 /**
- * @brief Bounded set of distinct entries stored in an unordered, reserved vector.
- * @tparam Entry Equality-comparable, totally ordered buffered pair type.
+ * @brief Bounded entries stored in an unordered, reserved vector.
+ * @tparam Entry Equality-comparable, totally ordered entry type.
+ * @tparam Unique Whether equal entries must be deduplicated. False retains
+ * hash multiplicities for legal streams without a duplicate search.
  * @note Searches and extrema scans take linear time in the active size.
  * Threshold admission and fault/recovery decisions belong to the owning sketch.
  */
-template<class Entry>
+template<class Entry, bool Unique = true>
 class ArrayBuffer {
 public:
     /**
      * @brief Creates an empty buffer with reserved storage.
-     * @param capacity Maximum number of distinct entries to retain.
+     * @param capacity Maximum number of entries to retain.
      * @pre capacity is positive; the owning sketch validates this.
      */
     explicit ArrayBuffer(std::size_t capacity) : capacity_(capacity) {
@@ -79,15 +82,17 @@ public:
     void clear() noexcept { entries_.clear(); }
 
     /**
-     * @brief Inserts a distinct entry, retaining the smallest entries if full.
-     * @param entry Pair to consider; duplicates do not consume capacity.
-     * @return True if a new entry was retained; false for a duplicate or an entry
-     * greater than the maximum of an already-full buffer.
+     * @brief Inserts an entry, retaining the smallest entries if full.
+     * @param entry Entry to consider; equal entries consume capacity when !Unique.
+     * @return True if storage changed; false for a duplicate when Unique, or a
+     * value at least as large as the maximum of an already-full buffer.
      * @note The caller must apply the sketch's retained threshold first.
      */
     bool insert(const Entry& entry) {
-        if (std::find(entries_.begin(), entries_.end(), entry) != entries_.end()) {
-            return false;
+        if constexpr (Unique) {
+            if (std::find(entries_.begin(), entries_.end(), entry) != entries_.end()) {
+                return false;
+            }
         }
         if (size() < capacity_) {
             entries_.push_back(entry);
@@ -102,8 +107,8 @@ public:
     }
 
     /**
-     * @brief Removes a pair by exact identity, filling its slot with the last pair.
-     * @param entry Exact (hash, element) pair to remove.
+     * @brief Removes one matching entry, filling its slot with the last entry.
+     * @param entry Value to remove, even if multiple equal entries are stored.
      * @return True if an entry was removed; false if absent.
      */
     bool erase(const Entry& entry) {
@@ -117,7 +122,7 @@ public:
     }
 
     /**
-     * @brief Scans for the smallest active pair.
+     * @brief Scans for the smallest active entry.
      * @return Reference to the minimum; do not retain it across buffer mutations.
      * @pre The buffer is nonempty.
      */
@@ -125,7 +130,7 @@ public:
         return *std::min_element(entries_.begin(), entries_.end());
     }
     /**
-     * @brief Scans for the largest active pair.
+     * @brief Scans for the largest active entry.
      * @return Reference to the maximum; do not retain it across buffer mutations.
      * @pre The buffer is nonempty.
      */
@@ -139,38 +144,46 @@ private:
 };
 
 /**
- * @brief Bounded set of distinct pairs stored in an ordered tree.
- * @tparam Entry Equality-comparable, totally ordered buffered pair type.
+ * @brief Bounded entries stored in an ordered tree.
+ * @tparam Entry Equality-comparable, totally ordered entry type.
+ * @tparam Unique Selects set for distinct entries or multiset for hash multiplicities.
  * @note Updates take logarithmic time in the buffer size. Threshold admission
  * and fault/recovery decisions belong to the owning sketch.
  */
-template<class Entry>
+template<class Entry, bool Unique = true>
 class TreeBuffer {
 public:
     /**
      * @brief Creates an empty tree buffer.
-     * @param capacity Maximum number of distinct entries to retain.
+     * @param capacity Maximum number of entries to retain.
      * @pre capacity is positive; the owning sketch validates this.
      */
     explicit TreeBuffer(std::size_t capacity) : capacity_(capacity) {}
 
     /// Returns true when the tree contains no entries.
     [[nodiscard]] bool empty() const noexcept { return entries_.empty(); }
-    /// Returns the number of stored distinct entries.
+    /// Returns the number of stored entries, counting multiplicities when !Unique.
     [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
     /// Removes all tree nodes while preserving the configured capacity.
     void clear() noexcept { entries_.clear(); }
 
     /**
-     * @brief Inserts a distinct pair, removing the maximum if capacity is exceeded.
-     * @param entry Pair to consider; duplicates do not consume capacity.
-     * @return True if a new entry was retained; false for a duplicate or an entry
-     * discarded as the maximum of an over-capacity buffer.
+     * @brief Inserts an entry, removing the maximum if capacity is exceeded.
+     * @param entry Value to consider; equal entries consume capacity when !Unique.
+     * @return True if a new entry was retained; false for a duplicate when Unique
+     * or an entry discarded as the maximum of an over-capacity buffer.
      * @note The caller must apply the sketch's retained threshold first.
      */
     bool insert(const Entry& entry) {
-        const auto [position, inserted] = entries_.insert(entry);
-        if (!inserted) {
+        const auto position = [&] {
+            if constexpr (Unique) {
+                const auto [found, inserted] = entries_.insert(entry);
+                return inserted ? found : entries_.end();
+            } else {
+                return entries_.insert(entry);
+            }
+        }();
+        if (position == entries_.end()) {
             return false;
         }
         if (size() > capacity_) {
@@ -183,20 +196,27 @@ public:
     }
 
     /**
-     * @brief Removes a pair by its exact hash and element identity.
-     * @param entry Pair to remove.
-     * @return True if the pair existed and was removed; false if absent.
+     * @brief Removes exactly one matching entry, preserving other equal entries.
+     * @param entry Value to remove.
+     * @return True if an entry existed and was removed; false if absent.
      */
-    bool erase(const Entry& entry) { return entries_.erase(entry) != 0; }
+    bool erase(const Entry& entry) {
+        const auto found = entries_.find(entry);
+        if (found == entries_.end()) {
+            return false;
+        }
+        entries_.erase(found);
+        return true;
+    }
 
     /**
-     * @brief Returns the smallest stored pair.
+     * @brief Returns the smallest stored entry.
      * @return Reference to the minimum; do not retain it across buffer mutations.
      * @pre The buffer is nonempty.
      */
     [[nodiscard]] const Entry& minimum() const { return *entries_.begin(); }
     /**
-     * @brief Returns the largest stored pair.
+     * @brief Returns the largest stored entry.
      * @return Reference to the maximum; do not retain it across buffer mutations.
      * @pre The buffer is nonempty.
      */
@@ -204,7 +224,7 @@ public:
 
 private:
     std::size_t capacity_;
-    std::set<Entry> entries_;
+    std::conditional_t<Unique, std::set<Entry>, std::multiset<Entry>> entries_;
 };
 
 } // namespace buffered_minhash::detail

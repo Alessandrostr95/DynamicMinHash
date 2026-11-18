@@ -16,13 +16,19 @@
 #include <utility>
 #include <vector>
 
-/// General-stream buffered MinHash sketches and their hash configurations.
+/// Buffered MinHash sketches and their shared hash configurations.
 namespace buffered_minhash {
 
-/// Storage strategy for each bounded buffer; both implement the same set semantics.
+/// Storage strategy for each bounded buffer.
 enum class BufferKind {
     Array, ///< Unordered contiguous entries; buffer searches take linear time.
-    Tree   ///< Ordered distinct entries; searches and updates take logarithmic time.
+    Tree   ///< Ordered entries; searches and updates take logarithmic time.
+};
+
+/// Compile-time update contract; use LegalBufferedMinhash for the legal variant.
+enum class StreamKind {
+    General, ///< Redundant updates are supported through stored element identities.
+    Legal    ///< Insert absent elements and erase present elements only; unchecked.
 };
 
 /// Outcome of an update, describing sketch validity rather than set membership.
@@ -43,10 +49,17 @@ enum class SketchState {
  * @tparam Kind Buffer representation: Array (default) or Tree.
  * @tparam Hash Immutable hash function type satisfying HashFunction, with input type
  * Element. Defaults to TabulationHash<Element> with uint64_t outputs.
+ * @tparam Stream General (default) or Legal; selects storage at compile time.
  *
- * Each of the k hash functions has a buffer of at most ell distinct
+ * For General streams, each hash function has a buffer of at most ell distinct
  * (hash, element) pairs. Duplicate insertions and deletion of absent elements
- * are supported. The sketch neither owns nor retains the authoritative set.
+ * are supported. For Legal streams, buffers retain only hashes, including
+ * multiplicities on collisions: insertions must be absent elements and deletions
+ * must be present elements. restore() must enumerate each element exactly once.
+ * These legal-stream preconditions are not checked; violations can silently
+ * produce incorrect signatures. Collisions can cause earlier recovery than in
+ * General mode, but signatures remain exact while Ready under the contract.
+ * The sketch neither owns nor retains the authoritative set.
  * Update that set before calling insert() or erase(). If a deletion exhausts
  * a buffer, restore() must rebuild the sketch from the current set.
  *
@@ -57,13 +70,17 @@ enum class SketchState {
  */
 template<ElementType Element = std::uint32_t,
          BufferKind Kind = BufferKind::Array,
-         class Hash = TabulationHash<Element>>
+         class Hash = TabulationHash<Element>,
+         StreamKind Stream = StreamKind::General>
     requires HashFunction<Hash> && std::same_as<typename Hash::element_type, Element> &&
-             (Kind == BufferKind::Array || Kind == BufferKind::Tree)
+             (Kind == BufferKind::Array || Kind == BufferKind::Tree) &&
+             (Stream == StreamKind::General || Stream == StreamKind::Legal)
 class BufferedMinhash {
 public:
-    /// Exact identity type stored alongside each buffered hash.
+    /// Input element type; identities are retained only for general streams.
     using element_type = Element;
+    /// Compile-time update contract; no runtime mode switching is supported.
+    static constexpr StreamKind stream_kind = Stream;
     /// Hash output and signature coordinate type, independent of element width.
     using hash_type = typename Hash::hash_type;
     /// Immutable ordered configuration of the k concrete hash functions.
@@ -75,7 +92,7 @@ public:
 
     /**
      * @brief Constructs a ready, empty sketch using shared hash functions.
-     * @param capacity Maximum number of distinct pairs per buffer (ell); positive.
+     * @param capacity Maximum number of entries per buffer (ell); positive.
      * @param hashes Non-null shared configuration; its function count determines k.
      * @throws std::invalid_argument If capacity is zero or hashes is null.
      * @note The configuration is shared, not cloned. The new signature is empty.
@@ -96,7 +113,7 @@ public:
     /**
      * @brief Constructs a ready, empty sketch with automatically seeded hashes.
      * @param k Number of hash functions and signature coordinates; positive.
-     * @param capacity Maximum number of distinct pairs per buffer (ell); positive.
+     * @param capacity Maximum number of entries per buffer (ell); positive.
      * @throws std::invalid_argument If k or capacity is zero.
      * @note Available when Hash accepts a uint64_t seed. Reuse hash_family() to
      * create compatible sketches; independent construction need not be compatible.
@@ -108,7 +125,7 @@ public:
     /**
      * @brief Constructs a ready, empty sketch with reproducibly seeded hashes.
      * @param k Number of hash functions and signature coordinates; positive.
-     * @param capacity Maximum number of distinct pairs per buffer (ell); positive.
+     * @param capacity Maximum number of entries per buffer (ell); positive.
      * @param seed Seed used to generate the ordered hash configuration.
      * @throws std::invalid_argument If k or capacity is zero.
      * @note Available when Hash accepts a uint64_t seed. Custom hash constructors
@@ -173,7 +190,7 @@ public:
         return hashes_ ? hashes_->size() : 0;
     }
     /**
-     * @brief Returns the maximum number of pairs in each buffer (ell).
+     * @brief Returns the maximum number of entries in each buffer (ell).
      * @return Buffer capacity, or zero for a moved-from sketch.
      */
     [[nodiscard]] std::size_t buffer_capacity() const noexcept { return capacity_; }
@@ -193,12 +210,13 @@ public:
     [[nodiscard]] hash_family_ptr hash_family() const noexcept { return hashes_; }
 
     /**
-     * @brief Incorporates an element insertion with idempotent set semantics.
+     * @brief Incorporates an element insertion into the represented set.
      * @param element Exact element identity inserted into the authoritative set.
      * @return UpdateResult::Ok; this does not indicate whether the set changed.
      * @pre The authoritative set has already been updated.
+     * @pre For Legal streams, element was absent before this update (unchecked).
      * @throws std::logic_error If recovery is required or the sketch is moved-from.
-     * @note Repeated insertion of the same element is harmless. Discard previous
+     * @note For General streams, repeated insertion is harmless. Discard previous
      * signature views after calling this method.
      */
     [[nodiscard]] UpdateResult insert(Element element) {
@@ -208,19 +226,21 @@ public:
     }
 
     /**
-     * @brief Incorporates a deletion, ignoring an element that is already absent.
+     * @brief Incorporates an element deletion from the represented set.
      * @param element Exact element identity removed from the authoritative set.
      * @return Ok if no buffer is exhausted; NeedsRecovery otherwise. The result
      * does not indicate whether the element previously belonged to the set.
      * @pre The authoritative set has already been updated.
+     * @pre For Legal streams, element was present before this update (unchecked).
      * @throws std::logic_error If recovery is required or the sketch is moved-from.
      * @note On NeedsRecovery, call restore() with the current set after this
      * deletion, even if that set is empty. Discard previous signature views.
+     * For General streams, deletion of an absent element is harmless.
      */
     [[nodiscard]] UpdateResult erase(Element element) {
         require_ready();
         for (std::size_t i = 0; i < buffers_.size(); ++i) {
-            const entry_type entry{(*hashes_)[i](element), element};
+            const auto entry = make_entry((*hashes_)[i](element), element);
             if (thresholds_[i] && entry > *thresholds_[i]) {
                 continue;
             }
@@ -233,8 +253,8 @@ public:
                 state_ = SketchState::NeedsRecovery;
                 return UpdateResult::NeedsRecovery;
             }
-            if (signature_[i] == entry.hash) {
-                signature_[i] = buffer.minimum().hash;
+            if (signature_[i] == entry_hash(entry)) {
+                signature_[i] = entry_hash(buffer.minimum());
             }
         }
         return UpdateResult::Ok;
@@ -248,10 +268,12 @@ public:
      * @param last Past-the-end sentinel; [first, last) may be empty.
      * @pre The range is a coherent scan of the set after any fault-triggering
      * deletion, with no concurrent updates to that scan or this sketch.
+     * For Legal streams, each element must occur exactly once (unchecked).
      * @post The sketch is Ready and uses the same hash configuration.
      * @throws std::logic_error If this is a moved-from, unconfigured sketch.
-     * @note Duplicates are harmless. No full set or reference to the range is
-     * retained. Also usable on a ready sketch to replace its represented set.
+     * @note Duplicates are harmless only for General streams. No full set or
+     * reference to the range is retained. Also usable on a ready sketch to
+     * replace its represented set.
      * Discard previous signature views; unexpected traversal/allocation failures
      * are outside the supported recovery contract.
      */
@@ -277,7 +299,8 @@ public:
      * @brief Rebuilds every buffer from a single pass over the current set.
      * @tparam Range Input range whose value type is exactly element_type.
      * @param elements Coherent current set, including the fault-triggering
-     * deletion. Empty ranges and repeated elements are supported.
+     * deletion. Empty ranges are supported; repeated elements only for General streams.
+     * @pre For Legal streams, elements contains no duplicates (unchecked).
      * @post The sketch is Ready and uses the same hash configuration.
      * @throws std::logic_error If this is a moved-from, unconfigured sketch.
      * @note Does not retain the range or copy the entire set. Discard previous
@@ -323,23 +346,44 @@ public:
     /**
      * @brief Checks whether two sketches use the same ordered hash configuration.
      * @tparam OtherKind Buffer representation of the other sketch.
+     * @tparam OtherStream Update contract of the other sketch; it may differ.
      * @param other Sketch with the same element and concrete hash types.
      * @return True for shared or value-equal configurations; false if either
      * sketch is unconfigured. Buffer capacities and represented sets may differ.
      * @note This checks configuration only, not readiness. It is O(1) for a
      * shared configuration; otherwise it compares the complete hash parameters.
      */
-    template<BufferKind OtherKind>
-    [[nodiscard]] bool compatible_with(const BufferedMinhash<Element, OtherKind, Hash>& other) const {
+    template<BufferKind OtherKind, StreamKind OtherStream>
+    [[nodiscard]] bool compatible_with(
+        const BufferedMinhash<Element, OtherKind, Hash, OtherStream>& other) const {
         const auto other_hashes = other.hash_family();
         return hashes_ && other_hashes &&
                (hashes_ == other_hashes || *hashes_ == *other_hashes);
     }
 
 private:
-    using entry_type = detail::Entry<Element, hash_type>;
+    static constexpr bool unique_entries = Stream == StreamKind::General;
+    using entry_type = std::conditional_t<unique_entries,
+        detail::Entry<Element, hash_type>, hash_type>;
     using buffer_type = std::conditional_t<Kind == BufferKind::Array,
-        detail::ArrayBuffer<entry_type>, detail::TreeBuffer<entry_type>>;
+        detail::ArrayBuffer<entry_type, unique_entries>,
+        detail::TreeBuffer<entry_type, unique_entries>>;
+
+    static entry_type make_entry(hash_type hash, Element element) {
+        if constexpr (unique_entries) {
+            return {hash, element};
+        } else {
+            return hash;
+        }
+    }
+
+    static hash_type entry_hash(const entry_type& entry) {
+        if constexpr (unique_entries) {
+            return entry.hash;
+        } else {
+            return entry;
+        }
+    }
 
     void require_ready() const {
         if (state_ != SketchState::Ready || !hashes_) {
@@ -349,7 +393,7 @@ private:
 
     void insert_unchecked(Element element) {
         for (std::size_t i = 0; i < buffers_.size(); ++i) {
-            const entry_type entry{(*hashes_)[i](element), element};
+            const auto entry = make_entry((*hashes_)[i](element), element);
             if (thresholds_[i] && entry > *thresholds_[i]) {
                 continue;
             }
@@ -360,8 +404,8 @@ private:
             if (buffer.size() == capacity_) {
                 thresholds_[i] = buffer.maximum();
             }
-            if (buffer.size() == 1 || entry.hash < signature_[i]) {
-                signature_[i] = entry.hash;
+            if (buffer.size() == 1 || entry_hash(entry) < signature_[i]) {
+                signature_[i] = entry_hash(entry);
             }
         }
     }
@@ -375,11 +419,33 @@ private:
 };
 
 /**
+ * @brief Compact buffered MinHash specialized for legal set-update streams.
+ * @tparam Element Input type: uint32_t (default) or uint64_t.
+ * @tparam Kind Array (default) or Tree buffer storage.
+ * @tparam Hash Hash function type, defaulting to 64-bit-output tabulation hashing.
+ *
+ * Stores only hash values, with multiplicities for distinct colliding elements.
+ * Array insertion omits the duplicate search; trees use a multiset. The API and
+ * recovery protocol match BufferedMinhash. Hash families and comparisons can be
+ * shared with general sketches. No authoritative set is retained or checked.
+ * @pre Insert only absent elements, erase only present elements, and supply
+ * duplicate-free ranges to restore(). Reinsertion after a deletion is allowed.
+ * @note Violating these unchecked preconditions can silently corrupt signatures.
+ * Collisions at the threshold can cause earlier recovery than in general sketches.
+ */
+template<ElementType Element = std::uint32_t,
+         BufferKind Kind = BufferKind::Array,
+         class Hash = TabulationHash<Element>>
+using LegalBufferedMinhash = BufferedMinhash<Element, Kind, Hash, StreamKind::Legal>;
+
+/**
  * @brief Estimates Jaccard similarity by comparing corresponding hash values.
  * @tparam Element Common element identity type.
  * @tparam Left Buffer strategy of the first sketch.
  * @tparam Right Buffer strategy of the second sketch.
  * @tparam Hash Common concrete hash function type.
+ * @tparam LeftStream Update contract of the first sketch.
+ * @tparam RightStream Update contract of the second sketch; it may differ.
  * @param left First sketch, with a compatible hash configuration and ready state.
  * @param right Second sketch; buffer capacity may differ from left.
  * @return Fraction of equal coordinates for nonempty sets. By convention,
@@ -388,9 +454,10 @@ private:
  * @throws std::logic_error If configurations are compatible but a sketch needs recovery.
  * @note Statistical accuracy depends on the chosen hash family and k.
  */
-template<ElementType Element, BufferKind Left, BufferKind Right, class Hash>
-[[nodiscard]] double similarity(const BufferedMinhash<Element, Left, Hash>& left,
-                                const BufferedMinhash<Element, Right, Hash>& right) {
+template<ElementType Element, BufferKind Left, BufferKind Right, class Hash,
+         StreamKind LeftStream, StreamKind RightStream>
+[[nodiscard]] double similarity(const BufferedMinhash<Element, Left, Hash, LeftStream>& left,
+                                const BufferedMinhash<Element, Right, Hash, RightStream>& right) {
     if (!left.compatible_with(right)) {
         throw std::invalid_argument("cannot compare incompatible hash configurations");
     }
