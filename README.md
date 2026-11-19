@@ -47,12 +47,39 @@ target_link_libraries(your_target PRIVATE BufferedMinhash::buffered_minhash)
 ## Python wrapper (optional)
 
 The pybind11 extension exposes the same update/recovery contract. It requires
-Python 3.10 or newer and a C++20 compiler. Install into a virtual environment:
+Python 3.10 or newer, its matching development headers, and a C++20 compiler.
+On Fedora, install the system prerequisites before building with pip:
+
+```sh
+sudo dnf install gcc-c++ python3-devel python3-pip
+```
+
+The [Fedora python3-devel package](https://packages.fedoraproject.org/pkgs/python3.14/python3-devel/)
+provides the headers needed to compile Python extensions. If building with a
+specific interpreter version, use its matching development package and invoke
+pip through that interpreter. For example, for Python 3.14:
+
+```sh
+sudo dnf install python3.14-devel
+python3.14 -m venv .venv
+.venv/bin/python -m pip install .
+```
+
+For the default Python interpreter, install into a virtual environment with:
 
 ```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install .
 ```
+
+If CMake reports that `/usr/include/python3.14/patchlevel.h` cannot be read,
+check that the matching development package is installed and its headers are
+accessible. Missing headers can also cause follow-up errors such as `list GET
+given empty list` and `Could NOT find Python (missing: Interpreter
+Development.Module)`. Pip's isolated build environment installs Python build
+dependencies, but does not install system development headers. The message
+`Defaulting to user installation` only describes pip's destination and is not
+the cause of a missing-header error.
 
 The build uses pybind11 and scikit-build-core, following the
 [pybind11 CMake packaging workflow](https://pybind11.readthedocs.io/en/stable/compiling.html).
