@@ -9,11 +9,10 @@ import numpy as np
 from tqdm import tqdm
 from collections import deque
 
-
-n = 2**12
+n = 2**16
 k = 2000
 l = 32
-n_runs = 1
+n_runs = 5
 
 
 def steady_size(n, capacity, k, legal=False):
