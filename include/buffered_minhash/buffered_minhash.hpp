@@ -19,6 +19,11 @@
 /// Buffered MinHash sketches and their shared hash configurations.
 namespace buffered_minhash {
 
+// Defined in minhash.hpp; forward-declared for cross-variant comparisons.
+template<ElementType Element, class Hash>
+    requires HashFunction<Hash> && std::same_as<typename Hash::element_type, Element>
+class Minhash;
+
 /// Storage strategy for each bounded buffer.
 enum class BufferKind {
     Array, ///< Unordered contiguous entries; buffer searches take linear time.
@@ -359,6 +364,16 @@ public:
         const auto other_hashes = other.hash_family();
         return hashes_ && other_hashes &&
                (hashes_ == other_hashes || *hashes_ == *other_hashes);
+    }
+
+    /**
+     * @brief Checks hash compatibility with a vanilla sketch.
+     * @param other Vanilla sketch with the same element and concrete hash types.
+     * @return True for shared or equal configurations, independently of state.
+     * @note Include minhash.hpp to construct the vanilla sketch.
+     */
+    [[nodiscard]] bool compatible_with(const Minhash<Element, Hash>& other) const {
+        return other.compatible_with(*this);
     }
 
 private:

@@ -1,4 +1,4 @@
-#include <buffered_minhash/buffered_minhash.hpp>
+#include <buffered_minhash/minhash.hpp>
 
 #include <algorithm>
 #include <array>
@@ -510,6 +510,225 @@ void randomized_cases(std::shared_ptr<const HashFamily<Hash>> hashes) {
     }
 }
 
+// Test-only counters do not affect hash outputs or configuration equality.
+template<ElementType Element, HashValueType Value>
+struct CountingHash {
+    using element_type = Element;
+    using hash_type = Value;
+    TestHash<Element, Value> function;
+    std::shared_ptr<std::array<std::size_t, 4>> calls;
+    std::size_t index;
+
+    Value operator()(Element element) const {
+        ++(*calls)[index];
+        return function(element);
+    }
+    bool operator==(const CountingHash& other) const { return function == other.function; }
+};
+
+template<ElementType Element, HashValueType Value>
+void vanilla_selective_recovery_cases() {
+    using Hash = CountingHash<Element, Value>;
+    using Sketch = Minhash<Element, Hash>;
+    auto calls = std::make_shared<std::array<std::size_t, 4>>();
+    const auto hashes = family<Hash>({
+        {TestHash<Element, Value>{}, calls, 0},
+        {{Value{3}, Value{3}}, calls, 1},
+        {{Value{3}, Value{2}}, calls, 2},
+        {TestHash<Element, Value>{}, calls, 3}});
+    Sketch sketch(hashes);
+    check_signature(sketch, {});
+    CHECK(sketch.erase(0) == UpdateResult::Ok);
+    sketch.restore(std::vector<Element>{0, 1, 2, 3});
+    CHECK(*calls == std::array<std::size_t, 4>{4, 4, 4, 4});
+    CHECK(*sketch.copy_signature() == std::vector<Value>({0, 0, 0, 0}));
+    calls->fill(0);
+    CHECK(sketch.erase(0) == UpdateResult::NeedsRecovery);
+    CHECK(*calls == std::array<std::size_t, 4>{0, 0, 0, 0});
+    check_throws<std::logic_error>([&] { (void)sketch.signature(); });
+    check_throws<std::logic_error>([&] { (void)sketch.copy_signature(); });
+    check_throws<std::logic_error>([&] { (void)sketch.insert(4); });
+    check_throws<std::logic_error>([&] { (void)sketch.erase(3); });
+
+    // Both the first AND last coordinates must be recovered. The two valid
+    // coordinates must not evaluate their hashes at all, even while scanning.
+    Sketch fault_copy(sketch);
+    sketch.restore(std::vector<Element>{1, 2, 3});
+    CHECK(*calls == std::array<std::size_t, 4>{3, 0, 0, 3});
+    CHECK(*sketch.copy_signature() == std::vector<Value>({1, 0, 0, 1}));
+    check_signature(sketch, {1, 2, 3});
+    CHECK(fault_copy.state() == SketchState::NeedsRecovery);
+    calls->fill(0);
+    fault_copy.restore(std::vector<Element>{1, 2, 3});
+    CHECK(*calls == std::array<std::size_t, 4>{3, 0, 0, 3});
+
+    calls->fill(0);
+    CHECK(sketch.erase(3) == UpdateResult::NeedsRecovery);
+    sketch.restore(std::vector<Element>{1, 2});
+    CHECK(*calls == std::array<std::size_t, 4>{0, 2, 0, 0});
+    CHECK(*sketch.copy_signature() == std::vector<Value>({1, 1, 0, 1}));
+    check_signature(sketch, {1, 2});
+
+    // An unsuccessful one-pass scan keeps exactly the original repair targets.
+    // Its temporary candidates must be discarded when retrying the same set.
+    CHECK(sketch.erase(1) == UpdateResult::NeedsRecovery);
+    calls->fill(0);
+    auto failing_scan = std::views::iota(0, 2) | std::views::transform([](int index) -> Element {
+        if (index == 1) { throw std::runtime_error("test traversal error"); }
+        return Element{2};
+    });
+    check_throws<std::runtime_error>([&] { sketch.restore(failing_scan); });
+    CHECK(sketch.state() == SketchState::NeedsRecovery);
+    CHECK(*calls == std::array<std::size_t, 4>{1, 0, 0, 1});
+    calls->fill(0);
+    sketch.restore(std::vector<Element>{2});
+    CHECK(*calls == std::array<std::size_t, 4>{1, 0, 0, 1});
+    check_signature(sketch, {2});
+    CHECK(sketch.erase(2) == UpdateResult::NeedsRecovery);
+    calls->fill(0);
+    sketch.restore(std::vector<Element>{});
+    CHECK(*calls == std::array<std::size_t, 4>{0, 0, 0, 0});
+    check_signature(sketch, {});
+    CHECK(sketch.insert(0) == UpdateResult::Ok);
+    check_signature(sketch, {0});
+}
+
+template<ElementType Element, HashValueType Value>
+void vanilla_general_cases() {
+    using Hash = TestHash<Element, Value>;
+    using Sketch = Minhash<Element, Hash>;
+    const auto hashes = family<Hash>({Hash{Value{0}, Value{0}}, Hash{}});
+    Sketch sketch(hashes);
+    CHECK(sketch.hash_family() == hashes);
+    CHECK(sketch.signature_length() == 2);
+    CHECK(sketch.insert(2) == UpdateResult::Ok);
+    CHECK(sketch.insert(1) == UpdateResult::Ok);
+    CHECK(sketch.insert(1) == UpdateResult::Ok);
+    CHECK(sketch.erase(3) == UpdateResult::Ok); // Absent element with a colliding hash.
+    CHECK(sketch.erase(2) == UpdateResult::Ok); // Present, but not a winner.
+    CHECK(sketch.erase(2) == UpdateResult::Ok);
+    check_signature(sketch, {1});
+    const auto saved = sketch.copy_signature();
+    CHECK(sketch.erase(1) == UpdateResult::NeedsRecovery);
+    sketch.restore(std::vector<Element>{});
+    check_signature(sketch, {});
+    CHECK((*saved)[0] == 0 && (*saved)[1] == 1);
+
+    // Ready-state restore is full initialization/replacement; duplicates allowed.
+    std::istringstream input("7 2 7 11");
+    sketch.restore(std::istream_iterator<Element>{input}, std::istream_iterator<Element>{});
+    check_signature(sketch, {2, 7, 11});
+    Sketch copied(sketch);
+    CHECK(copied.erase(2) == UpdateResult::NeedsRecovery);
+    copied.restore(std::vector<Element>{7, 11, 7});
+    check_signature(copied, {7, 11});
+    check_signature(sketch, {2, 7, 11});
+    Sketch assigned(hashes);
+    assigned = copied;
+    CHECK(assigned.hash_family() == hashes);
+    CHECK(assigned.erase(7) == UpdateResult::NeedsRecovery);
+    Sketch moved(std::move(assigned));
+    CHECK(assigned.state() == SketchState::NeedsRecovery);
+    CHECK(assigned.signature_length() == 0);
+    CHECK(!assigned.hash_family());
+    CHECK(!assigned.compatible_with(moved));
+    check_throws<std::logic_error>([&] { assigned.restore(std::vector<Element>{}); });
+    check_throws<std::logic_error>([&] { (void)assigned.signature(); });
+    moved.restore(std::vector<Element>{11});
+    assigned = std::move(moved);
+    check_signature(assigned, {11});
+    CHECK(moved.state() == SketchState::NeedsRecovery);
+    moved = sketch;
+    check_signature(moved, {2, 7, 11});
+
+    const Element maximum = std::numeric_limits<Element>::max();
+    sketch.restore(std::vector<Element>{maximum});
+    check_signature(sketch, {maximum});
+    CHECK(sketch.erase(maximum) == UpdateResult::NeedsRecovery);
+    sketch.restore(std::vector<Element>{});
+    Sketch max_hash(family<Hash>({Hash{std::numeric_limits<Value>::max(),
+                                         std::numeric_limits<Value>::max()}}));
+    CHECK(max_hash.insert(0) == UpdateResult::Ok);
+    CHECK((*max_hash.signature())[0] == std::numeric_limits<Value>::max());
+    CHECK(max_hash.erase(0) == UpdateResult::NeedsRecovery);
+    max_hash.restore(std::vector<Element>{});
+    CHECK(!max_hash.signature());
+}
+
+void vanilla_configuration_cases() {
+    static_assert(std::same_as<Minhash<>::element_type, std::uint32_t>);
+    static_assert(std::same_as<Minhash<>::hash_type, std::uint64_t>);
+    static_assert(!std::default_initializable<Minhash<>>);
+    Minhash<> automatic(3);
+    Minhash<> shared(automatic.hash_family());
+    CHECK(automatic.compatible_with(shared));
+    Minhash<> a(3, 42), b(make_hash_family<>(3, 42)), wrong_seed(3, 43), wrong_k(2, 42);
+    CHECK(a.compatible_with(b));
+    CHECK(similarity(a, b) == 1.0);
+    CHECK(!a.compatible_with(wrong_seed));
+    CHECK(!a.compatible_with(wrong_k));
+    check_throws<std::invalid_argument>([&] { (void)similarity(a, wrong_seed); });
+    CHECK(a.insert(5) == UpdateResult::Ok);
+    CHECK(similarity(a, b) == 0.0);
+    CHECK(a.erase(5) == UpdateResult::NeedsRecovery);
+    check_throws<std::logic_error>([&] { (void)similarity(a, b); });
+    check_throws<std::invalid_argument>([] { Minhash<> invalid(std::size_t{0}); });
+    check_throws<std::invalid_argument>([] { Minhash<> invalid(Minhash<>::hash_family_ptr{}); });
+}
+
+template<ElementType Element, class Hash>
+void vanilla_stream_cases(std::shared_ptr<const HashFamily<Hash>> hashes) {
+    Minhash<Element, Hash> vanilla(hashes);
+    BufferedMinhash<Element, BufferKind::Array, Hash> array(1, hashes);
+    LegalBufferedMinhash<Element, BufferKind::Tree, Hash> legal(3, hashes);
+    CHECK(array.compatible_with(vanilla) && vanilla.compatible_with(array));
+    CHECK(legal.compatible_with(vanilla) && vanilla.compatible_with(legal));
+    std::set<Element> elements;
+    std::mt19937_64 generator(456);
+    for (std::size_t step = 0; step < 1500; ++step) {
+        Element element = static_cast<Element>(generator() % 32);
+        if (step % 11 == 0) { element = std::numeric_limits<Element>::max() - element; }
+        const bool insertion = (generator() & 1) != 0;
+        const bool changed = insertion ? elements.insert(element).second : elements.erase(element) != 0;
+        auto update = [&](auto& sketch) {
+            if (insertion) { CHECK(sketch.insert(element) == UpdateResult::Ok); }
+            else if (sketch.erase(element) == UpdateResult::NeedsRecovery) { sketch.restore(elements); }
+            check_signature(sketch, elements);
+        };
+        update(vanilla);
+        update(array);
+        if (changed) { update(legal); }
+        CHECK(similarity(vanilla, array) == 1.0 && similarity(array, vanilla) == 1.0);
+        CHECK(similarity(vanilla, legal) == 1.0 && similarity(legal, vanilla) == 1.0);
+    }
+}
+
+void vanilla_exhaustive_cases() {
+    using Hash = TestHash<std::uint32_t>;
+    using Sketch = Minhash<std::uint32_t, Hash>;
+    const auto hashes = family<Hash>({Hash{}, Hash{0, 0}, Hash{3, 3}, Hash{1, 0}});
+    auto visit = [&](auto&& self, const Sketch& sketch,
+                     const std::set<std::uint32_t>& elements, int depth) -> void {
+        check_signature(sketch, elements);
+        if (depth == 0) { return; }
+        for (std::uint32_t element = 0; element < 3; ++element) {
+            for (bool insertion : {false, true}) {
+                Sketch next(sketch);
+                auto expected = elements;
+                if (insertion) {
+                    expected.insert(element);
+                    CHECK(next.insert(element) == UpdateResult::Ok);
+                } else {
+                    expected.erase(element);
+                    if (next.erase(element) == UpdateResult::NeedsRecovery) { next.restore(expected); }
+                }
+                self(self, next, expected, depth - 1);
+            }
+        }
+    };
+    visit(visit, Sketch(hashes), {}, 6);
+}
+
 int main() {
     try {
         deterministic_cases<BufferKind::Array, std::uint32_t, std::uint32_t>();
@@ -540,7 +759,20 @@ int main() {
         legal_randomized_cases<std::uint32_t>(make_hash_family<>(5, 42));
         legal_randomized_cases<std::uint64_t>(make_hash_family<std::uint64_t>(5, 42));
         legal_randomized_cases<std::uint32_t>(family<Colliding>({Colliding{3, 0}, Colliding{1, 1}}));
-        std::cout << "All BufferedMinhash correctness checks passed\n";
+        vanilla_selective_recovery_cases<std::uint32_t, std::uint32_t>();
+        vanilla_selective_recovery_cases<std::uint32_t, std::uint64_t>();
+        vanilla_selective_recovery_cases<std::uint64_t, std::uint32_t>();
+        vanilla_selective_recovery_cases<std::uint64_t, std::uint64_t>();
+        vanilla_general_cases<std::uint32_t, std::uint32_t>();
+        vanilla_general_cases<std::uint32_t, std::uint64_t>();
+        vanilla_general_cases<std::uint64_t, std::uint32_t>();
+        vanilla_general_cases<std::uint64_t, std::uint64_t>();
+        vanilla_configuration_cases();
+        vanilla_exhaustive_cases();
+        vanilla_stream_cases<std::uint32_t>(make_hash_family<>(4, 42));
+        vanilla_stream_cases<std::uint64_t>(make_hash_family<std::uint64_t>(4, 42));
+        vanilla_stream_cases<std::uint32_t>(family<Colliding>({Colliding{3, 0}, Colliding{1, 1}}));
+        std::cout << "All buffered and vanilla Minhash correctness checks passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

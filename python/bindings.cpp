@@ -1,4 +1,4 @@
-#include <buffered_minhash/buffered_minhash.hpp>
+#include <buffered_minhash/minhash.hpp>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
@@ -82,12 +82,20 @@ void bind_family(py::module_& module, const char* name) {
 template<class Element, bmh::BufferKind Kind>
 using Sketch = bmh::BufferedMinhash<Element, Kind>;
 
-template<class S>
+template<bool Vanilla = false, class S>
 void bind_sketch(py::class_<S>& cls) {
     using Element = typename S::element_type;
     using Family = PythonHashFamily<Element>;
     constexpr bool legal = S::stream_kind == bmh::StreamKind::Legal;
-    cls.def(py::init([](std::size_t k, std::size_t capacity, std::optional<std::uint64_t> seed) {
+    if constexpr (Vanilla) {
+        cls.def(py::init([](std::size_t k, std::optional<std::uint64_t> seed) {
+            return seed ? S(k, *seed) : S(k);
+        }), py::arg("k"), py::arg("seed") = py::none(),
+        "Create an empty vanilla sketch with k > 0 hashes. An optional seed makes construction reproducible.")
+        .def(py::init([](const Family& hashes) { return S(hashes.value); }), py::arg("hashes"),
+        "Create an empty vanilla sketch sharing hashes; no buffer capacity is needed.");
+    } else {
+        cls.def(py::init([](std::size_t k, std::size_t capacity, std::optional<std::uint64_t> seed) {
             return seed ? S(k, capacity, *seed) : S(k, capacity);
         }), py::arg("k"), py::arg("capacity"), py::arg("seed") = py::none(),
         "Create an empty sketch with k hashes and capacity entries per buffer. Both must be positive.")
@@ -95,7 +103,9 @@ void bind_sketch(py::class_<S>& cls) {
             return S(capacity, hashes.value);
         }), py::arg("capacity"), py::arg("hashes"),
         "Create an empty sketch sharing hashes; k is derived from that configuration.")
-       .def("insert", [](S& self, py::handle element) {
+        .def("buffer_capacity", &S::buffer_capacity, "Return the maximum entries per buffer (ell).");
+    }
+    cls.def("insert", [](S& self, py::handle element) {
             return self.insert(checked_element<Element>(element));
         }, py::arg("element"),
         legal ? "Insert an element that was absent before updating the external set. Unchecked precondition; returns UpdateResult.Ok."
@@ -103,12 +113,14 @@ void bind_sketch(py::class_<S>& cls) {
        .def("erase", [](S& self, py::handle element) {
             return self.erase(checked_element<Element>(element));
         }, py::arg("element"),
-        legal ? "Delete an element that was present before updating the external set (unchecked). Returns NeedsRecovery if a buffer empties; then call restore."
+        Vanilla ? "Delete after updating the external set; absent elements are harmless. Invalidate all coordinates won by this element, returning NeedsRecovery if any are lost. Reads and updates then require restore."
+        : legal ? "Delete an element that was present before updating the external set (unchecked). Returns NeedsRecovery if a buffer empties; then call restore."
               : "Delete after updating the external set; absent elements are harmless. Returns NeedsRecovery if a buffer empties; then call restore.")
        .def("restore", [](S& self, py::iterable elements) {
             self.restore(ElementIterator<Element>{py::iter(elements)}, std::default_sentinel);
         }, py::arg("elements"),
-        legal ? "Rebuild from the current set in one pass. Requires distinct elements (unchecked); accepts generators and empty iterables; retains hashes."
+        Vanilla ? "After a fault, scan the unchanged current set after the triggering deletion and recompute only lost coordinates, preserving valid entries. When Ready, rebuild all coordinates to initialize or replace the set. Accepts generators, duplicates and empty iterables; retains hashes."
+        : legal ? "Rebuild from the current set in one pass. Requires distinct elements (unchecked); accepts generators and empty iterables; retains hashes."
               : "Rebuild from the current set in one pass. Accepts generators, duplicates and empty iterables; retains hashes.")
        .def("signature", &S::copy_signature,
         "Return an independent list of hash values, or None for a known empty set. Raises RuntimeError on fault.")
@@ -116,11 +128,10 @@ void bind_sketch(py::class_<S>& cls) {
         "Return an independent signature list, or None. Equivalent to signature() in Python.")
        .def("state", &S::state, "Return SketchState.Ready or SketchState.NeedsRecovery.")
        .def("signature_length", &S::signature_length, "Return the number of hash functions k.")
-       .def("buffer_capacity", &S::buffer_capacity, "Return the maximum entries per buffer (ell).")
        .def("hash_family", [](const S& self) { return Family{self.hash_family()}; },
         "Return a shared immutable hash configuration; no hash tables are copied.")
        .def("copy", [](const S& self) { return S(self); },
-        "Copy buffers and state independently, sharing only the immutable hashes.")
+        "Copy mutable state independently, sharing only the immutable hashes.")
        .def("__copy__", [](const S& self) { return S(self); });
 }
 
@@ -142,7 +153,7 @@ void bind_comparisons(py::module_& module, py::class_<Left>& cls, const py::clas
 
 template<class Element>
 void bind_width(py::module_& module, const char* family_name, const char* array_name, const char* tree_name,
-                const char* legal_array_name, const char* legal_tree_name) {
+                const char* legal_array_name, const char* legal_tree_name, const char* minhash_name) {
     bind_family<Element>(module, family_name);
     py::class_<Sketch<Element, bmh::BufferKind::Array>> array(module, array_name,
         "General-stream buffered MinHash with array buffers. The application owns the set.");
@@ -152,20 +163,24 @@ void bind_width(py::module_& module, const char* family_name, const char* array_
         "Legal-stream buffered MinHash storing only hashes in array buffers. Insert only absent elements, erase only present elements, and restore distinct elements. Preconditions are unchecked; violations can silently corrupt signatures.");
     py::class_<bmh::LegalBufferedMinhash<Element, bmh::BufferKind::Tree>> legal_tree(module, legal_tree_name,
         "Legal-stream buffered MinHash storing hash multiplicities in tree buffers. Insert only absent elements, erase only present elements, and restore distinct elements. Preconditions are unchecked; violations can silently corrupt signatures.");
+    py::class_<bmh::Minhash<Element>> vanilla(module, minhash_name,
+        "Vanilla MinHash without buffers. Supports redundant set updates and shared hashes. On deletion, all lost minima require recovery; restore recomputes only those coordinates and preserves valid ones. The application owns the set.");
     bind_sketch(array);
     bind_sketch(tree);
     bind_sketch(legal_array);
     bind_sketch(legal_tree);
-    bind_comparisons(module, array, array, tree, legal_array, legal_tree);
-    bind_comparisons(module, tree, array, tree, legal_array, legal_tree);
-    bind_comparisons(module, legal_array, array, tree, legal_array, legal_tree);
-    bind_comparisons(module, legal_tree, array, tree, legal_array, legal_tree);
+    bind_sketch<true>(vanilla);
+    bind_comparisons(module, array, array, tree, legal_array, legal_tree, vanilla);
+    bind_comparisons(module, tree, array, tree, legal_array, legal_tree, vanilla);
+    bind_comparisons(module, legal_array, array, tree, legal_array, legal_tree, vanilla);
+    bind_comparisons(module, legal_tree, array, tree, legal_array, legal_tree, vanilla);
+    bind_comparisons(module, vanilla, array, tree, legal_array, legal_tree, vanilla);
 }
 
 } // namespace
 
 PYBIND11_MODULE(buffered_minhash, module) {
-    module.doc() = "Buffered MinHash for dynamic sets with explicit recovery and shared immutable hashes.";
+    module.doc() = "Buffered and vanilla MinHash for dynamic sets with explicit recovery and shared immutable hashes.";
     module.attr("__version__") = "0.1.0";
     py::enum_<bmh::UpdateResult>(module, "UpdateResult", "Validity after an update, not a membership result.")
         .value("Ok", bmh::UpdateResult::Ok)
@@ -174,7 +189,7 @@ PYBIND11_MODULE(buffered_minhash, module) {
         .value("Ready", bmh::SketchState::Ready)
         .value("NeedsRecovery", bmh::SketchState::NeedsRecovery);
     bind_width<std::uint32_t>(module, "HashFamily", "BufferedMinhash", "TreeBufferedMinhash",
-                              "LegalBufferedMinhash", "LegalTreeBufferedMinhash");
+                              "LegalBufferedMinhash", "LegalTreeBufferedMinhash", "Minhash");
     bind_width<std::uint64_t>(module, "HashFamily64", "BufferedMinhash64", "TreeBufferedMinhash64",
-                              "LegalBufferedMinhash64", "LegalTreeBufferedMinhash64");
+                              "LegalBufferedMinhash64", "LegalTreeBufferedMinhash64", "Minhash64");
 }

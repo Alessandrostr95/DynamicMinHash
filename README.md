@@ -5,6 +5,8 @@ Both array and tree buffers support general set updates, including redundant
 insertions and deletion of absent elements. Specialized legal-stream variants
 store only hashes when the caller guarantees nonredundant updates. The application
 owns the underlying set; sketches request explicit recovery when needed.
+The library also provides vanilla `Minhash`, without buffers, with selective
+recovery of only the signature coordinates lost during deletion.
 
 The algorithm is described in [Maintaining k-MinHash Signatures over Fully-Dynamic
 Data Streams with Recovery](https://arxiv.org/abs/2407.21614). The original
@@ -126,8 +128,12 @@ and `copy`. Python's `copy.copy` also creates independent buffers sharing hashes
 Docstrings and parameter names are available through `help()`.
 Legal variants have the same methods and constructors; their stricter update and
 restore preconditions are described [below](#legal-stream-specialization).
-All four classes for a given element width can share a hash family and compare
+All buffered classes for a given element width can share a hash family and compare
 signatures with each other using `compatible_with` and `similarity`.
+They can also share hashes and compare with vanilla `Minhash` (`uint32_t` inputs)
+and `Minhash64` (`uint64_t` inputs). These take `k, seed=None` or `hashes` in their
+constructors, without a capacity parameter or `buffer_capacity()` method.
+See [vanilla MinHash](#vanilla-minhash-and-selective-recovery) for the recovery contract.
 
 Unlike the C++ view, Python `signature()` returns an **independent list**, or
 `None` for a known empty set. Invalid state raises `RuntimeError`; invalid
@@ -286,6 +292,86 @@ Element/hash widths, fault-state guards, copy/move behavior and hash-family
 sharing match the general API. The specialization removes identity storage and
 duplicate checks; end-to-end time and memory benefits, including recovery cost,
 remain to be measured in the experimental phase.
+
+## Vanilla MinHash and selective recovery
+
+[`Minhash<Element, Hash>`](include/buffered_minhash/minhash.hpp) maintains one
+minimum and its winning element per hash function, with no buffers or thresholds.
+The defaults are `uint32_t` elements and 64-bit tabulation hash outputs, as in the
+buffered variants. It supports general set semantics: redundant insertions,
+deletions of absent elements, and repeated elements during restoration are harmless.
+Hash collisions are resolved by element identity when selecting a winner.
+
+```cpp
+#include <buffered_minhash/minhash.hpp>
+#include <set>
+using namespace buffered_minhash;
+
+auto hashes = make_hash_family<>(128, 42);
+Minhash<> sketch(hashes);                  // shares hashes; no capacity argument
+Minhash<> seeded(128, 42);                 // k and seed
+Minhash<> automatic(128);                  // k, with automatically seeded hashes
+
+std::set<std::uint32_t> elements{1, 2, 3};
+sketch.restore(elements);                 // Ready: initializes all coordinates
+elements.erase(1);
+if (sketch.erase(1) == UpdateResult::NeedsRecovery) {
+    sketch.restore(elements);             // Fault: repairs ONLY lost coordinates
+}
+```
+
+Insertion updates the minima and returns `Ok`. Deletion checks **every** winning
+identity and invalidates all coordinates won by the removed element before
+returning `NeedsRecovery`. It does not stop at the first lost minimum. Signature
+reads and incremental updates are then blocked until restoration succeeds.
+
+`restore(range)` and `restore(first, last)` scan the current set once. Their
+behavior depends on the sketch state:
+
+- **NeedsRecovery:** recompute only the lost coordinates. Valid coordinates and
+  their winning identities are preserved, and their hash functions are not
+  evaluated during the scan. With `r` lost coordinates and `n` input elements,
+  recovery performs `n*r` hash evaluations, with O(n*r + r) work.
+- **Ready:** rebuild all coordinates, so the same method can initialize a new
+  sketch or replace its represented set, as in the buffered API.
+
+After a fault, the recovery range **must describe the set immediately after the
+triggering deletion, without any further unreported updates**. The retained
+minima depend on that precondition. To replace the set arbitrarily while faulty,
+construct a new sketch using the same hash family and initialize it instead.
+A failed input scan keeps the sketch in `NeedsRecovery`; retrying clears the
+same repair targets and recomputes them from the complete current set.
+
+An empty recovery succeeds when the set has become empty. `signature()` returns
+`nullopt` in C++ or `None` in Python only for a known empty, Ready sketch; fault
+state is reported separately. There are no reserved element or hash values.
+Storage is O(k), including winners, signature values and recovery indices.
+
+This is **not equivalent to `BufferedMinhash` with capacity 1**: the buffered
+implementation rebuilds every buffer after a fault, whereas vanilla preserves
+all surviving minima. The buffered recovery algorithm is unchanged.
+
+Python exposes both input widths with the same methods and docstrings:
+
+```python
+from buffered_minhash import HashFamily, Minhash, UpdateResult
+
+hashes = HashFamily(k=128, seed=42)
+sketch = Minhash(hashes=hashes)             # or Minhash(k=128, seed=42)
+elements = {1, 2, 3}
+sketch.restore(x for x in elements)        # one-pass generators supported
+
+elements.remove(1)
+if sketch.erase(1) == UpdateResult.NeedsRecovery:
+    sketch.restore(x for x in elements)    # only the invalidated coordinates
+signature = sketch.signature()            # independent list, or None if empty
+```
+
+Use `Minhash64` with `HashFamily64` for 64-bit elements. Hash sharing,
+`compatible_with`, `similarity`, `copy_signature`, state guards, and copy/move
+semantics match the buffered API. Comparisons work in both directions between
+vanilla and any general/legal array/tree variant with the same hash configuration.
+There is no separate legal-only vanilla class in this implementation.
 
 ## Signatures and similarity
 

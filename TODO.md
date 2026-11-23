@@ -8,8 +8,9 @@ unchecked items are follow-up work. Historical implementations are preserved in
 
 ## Current scope and priorities
 
-The general library and legal-stream specialization are implemented. Add new correctness tests alongside the
-implementation; performance benchmarks and statistical experiments belong to a
+The general buffered library, legal-stream specialization and vanilla Minhash
+are implemented. Add correctness tests alongside the implementation;
+performance benchmarks and statistical experiments belong to a
 later phase and are not prerequisites for implementation. The paper supplies the
 algorithmic proof; tests check that the code implements that algorithm correctly.
 
@@ -69,6 +70,28 @@ core sketch; the core does not retain a pointer to an application container.
 - [ ] In the experimental phase, compare general and legal variants on realistic
   workloads: time, actual memory, fault frequency and total recovery cost. Use
   these results to decide whether to maintain the specialization long-term.
+
+## Agreed: vanilla Minhash with selective recovery
+
+- [x] Implement `Minhash<Element, Hash>` as a separate class without buffers or
+  thresholds, storing a minimum hash and winning identity per coordinate.
+  Support general set semantics, including redundant updates and hash collisions.
+- [x] In deletion, inspect all coordinates and invalidate every affected minimum
+  before returning `NeedsRecovery`. Block signature reads and incremental updates.
+- [x] During recovery, scan the authoritative set once and evaluate only the hash
+  functions for the lost coordinates. Preserve every surviving minimum and its
+  winning identity; retain the same hash configuration.
+- [x] Keep Ready-state restore as full initialization/replacement for consistency
+  with the existing API. Document that selective fault recovery requires the set
+  immediately after the triggering deletion, without further unreported updates.
+- [x] Reuse shared hash families, state/result types, signature views/copies, and
+  copy/move conventions. Support comparisons with all buffered variants.
+- [x] Bind Python `Minhash` and `Minhash64`, including constructor/method docstrings,
+  generators, state guards, copies, validation and cross-variant comparisons.
+- [x] Verify selective recovery with per-function evaluation counters; cover
+  multiple lost coordinates, collisions, duplicates, empty sets, maximum values,
+  input iterators, interrupted scans, and exhaustive/randomized update sequences.
+- [x] Document usage in C++ and Python. Leave buffered recovery unchanged.
 
 ## Agreed: public interface and shared hash configuration
 
