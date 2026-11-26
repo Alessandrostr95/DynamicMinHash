@@ -31,6 +31,75 @@ class BindingTests(unittest.TestCase):
             (bmh.HashFamily64, bmh.Minhash64, bmh.BufferedMinhash64, 64),
         )
 
+    def test_buffered_recovery_policies(self):
+        for family, array, tree, bits in self.variants() + self.legal_variants():
+            for cls in (array, tree):
+                with self.subTest(cls=cls):
+                    hashes = family(7, seed=41)
+                    lazy = cls(2, hashes, recovery=bmh.RecoveryPolicy.EmptyOnly)
+                    full = cls(2, hashes)
+                    self.assertEqual(full.recovery_policy(), bmh.RecoveryPolicy.Full)
+                    self.assertEqual(lazy.recovery_policy(), bmh.RecoveryPolicy.EmptyOnly)
+                    self.assertTrue(lazy.compatible_with(full))
+                    for seeded in (cls(7, 2, seed=41, recovery=bmh.RecoveryPolicy.EmptyOnly),
+                                   cls(7, 2, recovery=bmh.RecoveryPolicy.EmptyOnly)):
+                        self.assertEqual(seeded.recovery_policy(), bmh.RecoveryPolicy.EmptyOnly)
+                    with self.assertRaises(TypeError):
+                        cls(2, hashes, recovery="EmptyOnly")
+                    self.assertIn("EmptyOnly", cls.restore.__doc__)
+                    self.assertIn("recovery", cls.__init__.__doc__)
+
+                    maximum = (1 << bits) - 1
+                    lazy.restore({maximum})
+                    self.assertEqual(lazy.erase(maximum), bmh.UpdateResult.NeedsRecovery)
+                    for cloned in (lazy, lazy.copy(), copy.copy(lazy)):
+                        self.assertEqual(cloned.recovery_policy(), bmh.RecoveryPolicy.EmptyOnly)
+                        self.assertEqual(cloned.state(), bmh.SketchState.NeedsRecovery)
+                        cloned.restore(iter(()))
+                        self.assertIsNone(cloned.signature())
+
+                    # One-pass selective recovery, copy, and a fresh full-scan
+                    # reference after every update. Legal variants toggle only.
+                    legal = "Legal" in cls.__name__
+                    rng = random.Random(719)
+                    elements = set()
+                    for step in range(500):
+                        value = rng.choice([maximum, *range(20)])
+                        insertion = value not in elements if legal else bool(rng.getrandbits(1))
+                        if insertion:
+                            elements.add(value)
+                            self.assertEqual(lazy.insert(value), bmh.UpdateResult.Ok)
+                        else:
+                            elements.discard(value)
+                            if lazy.erase(value) == bmh.UpdateResult.NeedsRecovery:
+                                with self.assertRaises(RuntimeError):
+                                    lazy.signature()
+                                if elements:
+                                    def broken_scan():
+                                        yield next(iter(elements))
+                                        raise ValueError("interrupted input")
+                                    with self.assertRaises(ValueError):
+                                        lazy.restore(broken_scan())
+                                    self.assertEqual(lazy.state(), bmh.SketchState.NeedsRecovery)
+                                saved = copy.copy(lazy)
+                                lazy.restore(x for x in elements)
+                                saved.restore(x for x in elements)
+                                self.assertEqual(saved.signature(), lazy.signature())
+                        full.restore(elements)
+                        self.assertEqual(lazy.signature(), full.signature(), (cls, step))
+                        self.assertEqual(bmh.similarity(lazy, full), 1.0)
+
+                    # Ready restore replaces the entire set; invalid conversion
+                    # leaves all reconstruction targets pending for a retry.
+                    with self.assertRaises(OverflowError):
+                        lazy.restore(iter([maximum, -1]))
+                    lazy.restore(iter([maximum]))
+                    full.restore({maximum})
+                    self.assertEqual(lazy.signature(), full.signature())
+                    self.assertEqual(lazy.erase(maximum), bmh.UpdateResult.NeedsRecovery)
+                    lazy.restore(())
+                    self.assertIsNone(lazy.signature())
+
     def test_recovery_and_signature_ownership(self):
         for family, array, tree, bits in self.variants():
             for cls in (array, tree):

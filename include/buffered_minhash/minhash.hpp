@@ -22,7 +22,9 @@ namespace buffered_minhash {
  * blocked until restore() scans the current set and repairs only those entries.
  * Valid entries and their hash functions are not visited during that scan.
  * On a Ready sketch, restore() instead initializes/replaces the entire set, as
- * in BufferedMinhash. This is not BufferedMinhash with capacity one.
+ * in BufferedMinhash. Unlike capacity-one BufferedMinhash with Full recovery,
+ * surviving minima are preserved. EmptyOnly has the same selective behavior
+ * for general streams, but uses buffer containers and thresholds.
  *
  * Copies own independent mutable state and share immutable hashes. Access to
  * a single sketch requires external synchronization. Hash evaluation, storage

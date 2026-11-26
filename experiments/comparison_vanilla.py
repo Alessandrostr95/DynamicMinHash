@@ -3,8 +3,9 @@ from buffered_minhash import (
     Minhash,
     HashFamily,
     UpdateResult,
+    RecoveryPolicy,
 )
-from time import time
+from time import time, sleep
 import numpy as np
 from tqdm import tqdm
 from collections import deque
@@ -12,10 +13,16 @@ import json
 from pprint import pprint
 from pathlib import Path
 
-n = 2**19
+n = 2**16
 k = 2000
+# l = 12
 l = 32
-n_runs = 1
+n_runs = 10
+
+SLEEP_TIME = 50 / 1000  # sleep for 50 ms to simulate realistic latency
+
+# POLICY = RecoveryPolicy.EmptyOnly
+POLICY = RecoveryPolicy.Full
 
 
 def steady_size(n, capacity, k, vanilla=False):
@@ -23,7 +30,7 @@ def steady_size(n, capacity, k, vanilla=False):
     if vanilla:
         a = Minhash(hashes=hashes)
     else:
-        a = LegalBufferedMinhash(capacity=capacity, hashes=hashes)
+        a = LegalBufferedMinhash(capacity=capacity, hashes=hashes, recovery=POLICY)
 
     A = deque(np.random.randint(0, 2**28, size=n, dtype=np.uint32))
     inserts = np.random.randint(2**28, 2**32, size=n, dtype=np.uint32)
@@ -41,6 +48,7 @@ def steady_size(n, capacity, k, vanilla=False):
             # j = np.random.randint(0, len(A))
             # if a.erase(A.pop(j)) == UpdateResult.NeedsRecovery:
             if a.erase(A.popleft()) == UpdateResult.NeedsRecovery:
+                sleep(SLEEP_TIME)
                 a.restore(A)
                 n_faults += 1
 
@@ -52,7 +60,7 @@ def insert_then_delete(n, capacity, k, vanilla=False):
     if vanilla:
         a = Minhash(hashes=hashes)
     else:
-        a = LegalBufferedMinhash(capacity=capacity, hashes=hashes)
+        a = LegalBufferedMinhash(capacity=capacity, hashes=hashes, recovery=POLICY)
 
     start = time()
     n_faults = 0
@@ -62,6 +70,7 @@ def insert_then_delete(n, capacity, k, vanilla=False):
 
     for i in tqdm(range(n, -1, -1)):
         if a.erase(i) == UpdateResult.NeedsRecovery:
+            sleep(SLEEP_TIME) 
             a.restore(range(i))
             n_faults += 1
 
@@ -69,7 +78,7 @@ def insert_then_delete(n, capacity, k, vanilla=False):
 
 
 results = {}
-results["params"] = {"n": n, "n_hashes": k, "buffer_size": l, "n_runs": n_runs}
+results["params"] = {"n": n, "n_hashes": k, "buffer_size": l, "n_runs": n_runs, "recovery_policy": POLICY.name, "sleep_time": SLEEP_TIME}
 
 print("===== STEADY SIZE =====")
 

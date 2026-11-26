@@ -28,7 +28,7 @@ exception recovery or rollback machinery yet.
   `UpdateResult::NeedsRecovery`, and retain the recovery state in the sketch.
 - [x] When a deletion exhausts a buffer, enter `NeedsRecovery`. Reject signature
   queries and further incremental updates until recovery succeeds.
-- [x] Provide `restore(range)` or an iterator-based equivalent. Rebuild all
+- [x] Provide `restore(range)` or an iterator-based equivalent. With Full, rebuild all
   buffers and thresholds using the existing hash functions, without retaining
   or copying the full input set. A successful empty-set restore is valid too.
 - [x] Document that the application updates its authoritative set before notifying
@@ -91,7 +91,28 @@ core sketch; the core does not retain a pointer to an application container.
 - [x] Verify selective recovery with per-function evaluation counters; cover
   multiple lost coordinates, collisions, duplicates, empty sets, maximum values,
   input iterators, interrupted scans, and exhaustive/randomized update sequences.
-- [x] Document usage in C++ and Python. Leave buffered recovery unchanged.
+- [x] Document usage in C++ and Python. Preserve the default Full buffered recovery.
+
+## Agreed: lazy buffered recovery
+
+- [x] Add a constructor-selected `RecoveryPolicy` to all buffered variants:
+  `Full` remains the default; `EmptyOnly` repairs only exhausted buffers.
+- [x] Preserve Full deletion's immediate return at the first fault. Only
+  EmptyOnly completes deletion on every buffer and records all exhausted indices.
+- [x] Restore only recorded buffers and their thresholds after an EmptyOnly
+  fault, retaining all surviving buffers and thresholds, including partial ones.
+  Keep Ready-state restore as full initialization/replacement under both policies.
+- [x] Keep repair targets fixed through the entire scan and until it succeeds;
+  reset the same targets when retrying interrupted input. Copy/move policy and
+  pending state with the sketch. Do not add a runtime policy setter.
+- [x] Document that selective recovery requires the set immediately after the
+  triggering deletion without further unreported updates.
+- [x] Expose the enum, keyword-only `recovery` constructor parameter and
+  `recovery_policy()` getter in all eight Python buffered classes, with docstrings.
+- [x] Verify early exit and selective hash evaluation with counters, preserved
+  partial thresholds, multiple faults, collision-heavy exhaustive streams,
+  copies/moves, interrupted scans, empty sets, and Python bindings.
+- [ ] Evaluate theoretical guarantees and performance separately, in a later phase.
 
 ## Agreed: public interface and shared hash configuration
 
@@ -158,7 +179,7 @@ core sketch; the core does not retain a pointer to an application container.
   measurements to the experimental phase.
 - [x] Preserve thresholds across deletions. A buffer below capacity can retain a
   finite threshold; never infer infinity from its current size. Initialize or
-  restore infinity for buffers with fewer than the capacity's number of entries,
+  restore infinity for rebuilt buffers with fewer than the capacity's number of entries,
   and a finite maximum for full buffers. During incremental insertion, update
   the threshold to the buffer maximum when the resulting buffer is full.
 - [x] Treat construction and successful restoration from an empty set as valid

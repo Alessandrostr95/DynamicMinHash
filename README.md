@@ -123,7 +123,7 @@ c = BufferedMinhash(k=128, capacity=16, seed=42)  # seed is optional
 Both widths use 64-bit tabulation hash outputs. The initial binding exposes these
 built-in hashes, not arbitrary Python hash callbacks or other C++ hash types.
 Methods include `insert`, `erase`, `restore`, `signature`, `copy_signature`,
-`state`, `hash_family`, `signature_length`, `buffer_capacity`, `compatible_with`,
+`state`, `hash_family`, `signature_length`, `buffer_capacity`, `recovery_policy`, `compatible_with`,
 and `copy`. Python's `copy.copy` also creates independent buffers sharing hashes.
 Docstrings and parameter names are available through `help()`.
 Legal variants have the same methods and constructors; their stricter update and
@@ -132,7 +132,8 @@ All buffered classes for a given element width can share a hash family and compa
 signatures with each other using `compatible_with` and `similarity`.
 They can also share hashes and compare with vanilla `Minhash` (`uint32_t` inputs)
 and `Minhash64` (`uint64_t` inputs). These take `k, seed=None` or `hashes` in their
-constructors, without a capacity parameter or `buffer_capacity()` method.
+constructors, without capacity/recovery parameters or `buffer_capacity()` and
+`recovery_policy()` methods.
 See [vanilla MinHash](#vanilla-minhash-and-selective-recovery) for the recovery contract.
 
 Unlike the C++ view, Python `signature()` returns an **independent list**, or
@@ -218,8 +219,10 @@ Include `<unordered_set>` when using this example. A complete executable is in
 - If a deletion empties any buffer, `erase` returns `NeedsRecovery`. Signature
   access and further updates then throw `logic_error` until `restore` completes.
   This applies even when the authoritative set has become empty.
-- `restore(range)` and `restore(first, last)` rebuild **all** buffers from the
-  current set after the triggering deletion, using the same hash functions. Input
+- With the default `RecoveryPolicy::Full`, `erase` stops at the **first** fault.
+  `restore(range)` and `restore(first, last)` rebuild **all** buffers from the
+  current set after the triggering deletion, using the same hash functions. The
+  optional `EmptyOnly` policy repairs only exhausted buffers, as described below. Input
   must be a coherent snapshot/scan relative to updates. The input is traversed
   once and is neither retained nor copied into a full internal set. Repeated input
   elements are harmless in general variants; legal variants require distinct
@@ -228,15 +231,71 @@ Include `<unordered_set>` when using this example. A complete executable is in
   sketch is ready. Individual sketches require external synchronization; shared
   hash configurations must support concurrent const evaluation if used by threads.
 - The initial implementation assumes hash evaluation, allocations, container
-  operations, and range traversal succeed. There is no rollback or supported
-  recovery contract for unexpected exceptions. API argument/state errors are
-  checked separately; robust unexpected-exception handling is future work.
+  operations, and range traversal succeed. Interrupted restore scans keep their
+  reconstruction targets for retry, but there is no general rollback guarantee
+  for failed updates or hash/container operations. API argument/state errors are
+  checked separately; broader exception handling is future work.
 
 General array and tree buffers hold distinct `(hash, element)` pairs in lexicographic
 order (the array's physical storage is unordered). Each threshold is an optional
 pair: absence means infinity. Deletions retain thresholds even when a buffer is
 no longer full. A buffered element's deletion can therefore cause recovery later,
 without admitting previously discarded elements above the retained threshold.
+
+## Buffered recovery policies
+
+Choose `RecoveryPolicy::Full` (default) or `RecoveryPolicy::EmptyOnly` at
+construction. Both policies are available for array/tree buffers, general/legal
+streams, and both element widths, through the same classes.
+
+| Behavior | `Full` | `EmptyOnly` |
+| --- | --- | --- |
+| Deletion that causes a fault | Stop at the first exhausted buffer | Finish deletion on every buffer and record all exhausted indices |
+| Restore after a fault | Reset every buffer and threshold | Reset only recorded buffers and thresholds; preserve all others, even partial buffers |
+| Restore while Ready | Rebuild every buffer | Rebuild every buffer |
+
+```cpp
+using namespace buffered_minhash;
+auto hashes = make_hash_family<>(128, 42);
+BufferedMinhash<> lazy(16, hashes, RecoveryPolicy::EmptyOnly);
+LegalBufferedMinhash<std::uint32_t, BufferKind::Tree> legal(
+    128, 16, 42, RecoveryPolicy::EmptyOnly);
+// Automatic hashes: BufferedMinhash<> lazy(128, 16, RecoveryPolicy::EmptyOnly);
+```
+
+Python exposes the same enum and an optional **keyword-only** `recovery` argument
+on every buffered constructor:
+
+```python
+from buffered_minhash import BufferedMinhash, RecoveryPolicy, UpdateResult
+
+sketch = BufferedMinhash(k=128, capacity=16, seed=42,
+                        recovery=RecoveryPolicy.EmptyOnly)
+elements = {10, 20, 30}
+sketch.restore(elements)
+elements.remove(10)
+if sketch.erase(10) == UpdateResult.NeedsRecovery:
+    sketch.restore(x for x in elements)
+assert sketch.recovery_policy() == RecoveryPolicy.EmptyOnly
+```
+
+On an `EmptyOnly` fault, supply the authoritative set **immediately after the
+triggering deletion, without further unreported changes**. The surviving buffers
+depend on that precondition. To replace the set arbitrarily while faulty,
+construct a new sketch sharing the same hashes. Updates and signature reads stay
+blocked until restoration finishes, just as with `Full`.
+
+Recovery scans the input once, evaluating only the hash functions for the
+recorded indices. The index list stays fixed throughout the scan, including after
+buffers start filling. If input iteration or conversion fails, retrying resets
+the same targets before scanning the complete set again. An empty input is valid
+when the authoritative set has become empty.
+
+There is no policy setter. Copies and moves preserve policy and pending indices;
+assignment replaces them together with the rest of the sketch state. Hash
+compatibility and similarity do not depend on recovery policy. `EmptyOnly` keeps
+an additional list of up to k indices; `Full` does not populate that list.
+This feature introduces no new theoretical guarantees or benchmark claims.
 
 ## Legal-stream specialization
 
@@ -347,9 +406,12 @@ An empty recovery succeeds when the set has become empty. `signature()` returns
 state is reported separately. There are no reserved element or hash values.
 Storage is O(k), including winners, signature values and recovery indices.
 
-This is **not equivalent to `BufferedMinhash` with capacity 1**: the buffered
-implementation rebuilds every buffer after a fault, whereas vanilla preserves
-all surviving minima. The buffered recovery algorithm is unchanged.
+This differs from `BufferedMinhash` with capacity 1 and the default **Full**
+policy: Full rebuilds every buffer after a fault, whereas vanilla preserves all
+surviving minima. General-stream `BufferedMinhash` with capacity 1 and
+**EmptyOnly** has the same selective recovery behavior, but still uses buffer
+containers and thresholds. `Minhash` retains its dedicated storage and deletion
+implementation without hash evaluation.
 
 Python exposes both input widths with the same methods and docstrings:
 

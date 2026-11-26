@@ -36,6 +36,12 @@ enum class StreamKind {
     Legal    ///< Insert absent elements and erase present elements only; unchecked.
 };
 
+/// Reconstruction strategy, fixed at construction and copied with sketch state.
+enum class RecoveryPolicy {
+    Full,     ///< Stop at the first fault; restore every buffer (default).
+    EmptyOnly ///< Finish deletion; restore only buffers exhausted by that update.
+};
+
 /// Outcome of an update, describing sketch validity rather than set membership.
 enum class UpdateResult {
     Ok,           ///< The sketch remains ready, including after a redundant update.
@@ -66,7 +72,8 @@ enum class SketchState {
  * General mode, but signatures remain exact while Ready under the contract.
  * The sketch neither owns nor retains the authoritative set.
  * Update that set before calling insert() or erase(). If a deletion exhausts
- * a buffer, restore() must rebuild the sketch from the current set.
+ * a buffer, restore() must repair the sketch from the current set. Full recovery
+ * rebuilds every buffer; EmptyOnly preserves surviving buffers and thresholds.
  *
  * Copies have independent buffers and share only the immutable hash family.
  * Access to a single sketch must be externally synchronized.
@@ -99,13 +106,18 @@ public:
      * @brief Constructs a ready, empty sketch using shared hash functions.
      * @param capacity Maximum number of entries per buffer (ell); positive.
      * @param hashes Non-null shared configuration; its function count determines k.
-     * @throws std::invalid_argument If capacity is zero or hashes is null.
+     * @param recovery Reconstruction policy; Full by default, with no setter.
+     * @throws std::invalid_argument If capacity is zero, hashes is null, or policy invalid.
      * @note The configuration is shared, not cloned. The new signature is empty.
      */
-    BufferedMinhash(std::size_t capacity, hash_family_ptr hashes)
-        : hashes_(std::move(hashes)), capacity_(capacity) {
+    BufferedMinhash(std::size_t capacity, hash_family_ptr hashes,
+                    RecoveryPolicy recovery = RecoveryPolicy::Full)
+        : hashes_(std::move(hashes)), capacity_(capacity), recovery_(recovery) {
         if (!hashes_ || capacity == 0) {
             throw std::invalid_argument("hash family must be non-null and capacity positive");
+        }
+        if (recovery != RecoveryPolicy::Full && recovery != RecoveryPolicy::EmptyOnly) {
+            throw std::invalid_argument("unknown recovery policy");
         }
         buffers_.reserve(hashes_->size());
         for (std::size_t i = 0; i < hashes_->size(); ++i) {
@@ -113,35 +125,42 @@ public:
         }
         thresholds_.resize(hashes_->size());
         signature_.resize(hashes_->size());
+        if (recovery_ == RecoveryPolicy::EmptyOnly) {
+            pending_.reserve(hashes_->size());
+        }
     }
 
     /**
      * @brief Constructs a ready, empty sketch with automatically seeded hashes.
      * @param k Number of hash functions and signature coordinates; positive.
      * @param capacity Maximum number of entries per buffer (ell); positive.
-     * @throws std::invalid_argument If k or capacity is zero.
+     * @param recovery Reconstruction policy; Full by default.
+     * @throws std::invalid_argument If k or capacity is zero, or policy invalid.
      * @note Available when Hash accepts a uint64_t seed. Reuse hash_family() to
      * create compatible sketches; independent construction need not be compatible.
      */
-    BufferedMinhash(std::size_t k, std::size_t capacity)
+    BufferedMinhash(std::size_t k, std::size_t capacity,
+                    RecoveryPolicy recovery = RecoveryPolicy::Full)
         requires std::constructible_from<Hash, std::uint64_t>
-        : BufferedMinhash(capacity, make_hash_family<Element, Hash>(k)) {}
+        : BufferedMinhash(capacity, make_hash_family<Element, Hash>(k), recovery) {}
 
     /**
      * @brief Constructs a ready, empty sketch with reproducibly seeded hashes.
      * @param k Number of hash functions and signature coordinates; positive.
      * @param capacity Maximum number of entries per buffer (ell); positive.
      * @param seed Seed used to generate the ordered hash configuration.
-     * @throws std::invalid_argument If k or capacity is zero.
+     * @param recovery Reconstruction policy; Full by default.
+     * @throws std::invalid_argument If k or capacity is zero, or policy invalid.
      * @note Available when Hash accepts a uint64_t seed. Custom hash constructors
      * must be deterministic for seeded construction to be reproducible.
      */
-    BufferedMinhash(std::size_t k, std::size_t capacity, std::uint64_t seed)
+    BufferedMinhash(std::size_t k, std::size_t capacity, std::uint64_t seed,
+                    RecoveryPolicy recovery = RecoveryPolicy::Full)
         requires std::constructible_from<Hash, std::uint64_t>
-        : BufferedMinhash(capacity, make_hash_family<Element, Hash>(k, seed)) {}
+        : BufferedMinhash(capacity, make_hash_family<Element, Hash>(k, seed), recovery) {}
 
     /**
-     * @brief Copies buffers, thresholds, signature, and state independently.
+     * @brief Copies buffers, thresholds, signature, policy, and pending recovery independently.
      * @param other Sketch to copy, including a possible NeedsRecovery state.
      * @note Only the immutable hash configuration is shared with other.
      */
@@ -164,8 +183,10 @@ public:
     BufferedMinhash(BufferedMinhash&& other) noexcept
         : hashes_(std::move(other.hashes_)),
           capacity_(std::exchange(other.capacity_, 0)),
+          recovery_(other.recovery_),
           buffers_(std::move(other.buffers_)), thresholds_(std::move(other.thresholds_)),
           signature_(std::move(other.signature_)),
+          pending_(std::move(other.pending_)),
           state_(std::exchange(other.state_, SketchState::NeedsRecovery)) {}
 
     /**
@@ -179,9 +200,11 @@ public:
         if (this != &other) {
             hashes_ = std::move(other.hashes_);
             capacity_ = std::exchange(other.capacity_, 0);
+            recovery_ = other.recovery_;
             buffers_ = std::move(other.buffers_);
             thresholds_ = std::move(other.thresholds_);
             signature_ = std::move(other.signature_);
+            pending_ = std::move(other.pending_);
             state_ = std::exchange(other.state_, SketchState::NeedsRecovery);
         }
         return *this;
@@ -199,6 +222,12 @@ public:
      * @return Buffer capacity, or zero for a moved-from sketch.
      */
     [[nodiscard]] std::size_t buffer_capacity() const noexcept { return capacity_; }
+
+    /**
+     * @brief Returns the reconstruction policy selected at construction.
+     * @return Full or EmptyOnly; assignment replaces policy along with all state.
+     */
+    [[nodiscard]] RecoveryPolicy recovery_policy() const noexcept { return recovery_; }
 
     /**
      * @brief Reports whether signature access and incremental updates are allowed.
@@ -241,6 +270,8 @@ public:
      * @note On NeedsRecovery, call restore() with the current set after this
      * deletion, even if that set is empty. Discard previous signature views.
      * For General streams, deletion of an absent element is harmless.
+     * Full stops immediately at the first exhausted buffer. EmptyOnly processes
+     * every buffer and records all exhausted indices before returning.
      */
     [[nodiscard]] UpdateResult erase(Element element) {
         require_ready();
@@ -256,31 +287,40 @@ public:
             // Deletions retain the threshold, even if its entry was removed.
             if (buffer.empty()) {
                 state_ = SketchState::NeedsRecovery;
-                return UpdateResult::NeedsRecovery;
+                if (recovery_ == RecoveryPolicy::Full) {
+                    return UpdateResult::NeedsRecovery;
+                }
+                pending_.push_back(i);
+                continue;
             }
             if (signature_[i] == entry_hash(entry)) {
                 signature_[i] = entry_hash(buffer.minimum());
             }
         }
-        return UpdateResult::Ok;
+        return state_ == SketchState::Ready ? UpdateResult::Ok : UpdateResult::NeedsRecovery;
     }
 
     /**
-     * @brief Rebuilds every buffer from a single pass over an iterator range.
+     * @brief Restores the sketch from a single pass, according to recovery_policy().
      * @tparam Iterator Input iterator whose value type is exactly element_type.
      * @tparam Sentinel End sentinel compatible with Iterator.
      * @param first Iterator to the first element of the current authoritative set.
      * @param last Past-the-end sentinel; [first, last) may be empty.
      * @pre The range is a coherent scan of the set after any fault-triggering
-     * deletion, with no concurrent updates to that scan or this sketch.
+     * deletion, with no concurrent updates to that scan or this sketch. For
+     * EmptyOnly fault recovery, no further set changes may precede the scan.
      * For Legal streams, each element must occur exactly once (unchecked).
      * @post The sketch is Ready and uses the same hash configuration.
      * @throws std::logic_error If this is a moved-from, unconfigured sketch.
      * @note Duplicates are harmless only for General streams. No full set or
      * reference to the range is retained. Also usable on a ready sketch to
      * replace its represented set.
-     * Discard previous signature views; unexpected traversal/allocation failures
-     * are outside the supported recovery contract.
+     * Full always rebuilds all buffers. EmptyOnly after a fault rebuilds only
+     * exhausted buffers, preserving other buffers and their thresholds. When
+     * Ready, both policies rebuild all buffers. An interrupted scan leaves the
+     * same targets pending; retry resets those targets before scanning again.
+     * Discard previous signature views. This retry behavior does not provide a
+     * general exception guarantee for hash evaluation or container operations.
      */
     template<std::input_iterator Iterator, std::sentinel_for<Iterator> Sentinel>
         requires std::same_as<std::iter_value_t<Iterator>, Element>
@@ -288,20 +328,44 @@ public:
         if (!hashes_) {
             throw std::logic_error("assign a configured sketch before using a moved-from object");
         }
-        state_ = SketchState::NeedsRecovery;
-        for (auto& buffer : buffers_) {
-            buffer.clear();
-        }
-        std::fill(thresholds_.begin(), thresholds_.end(), std::nullopt);
-        std::fill(signature_.begin(), signature_.end(), hash_type{});
-        for (; first != last; ++first) {
-            insert_unchecked(*first);
+        if (recovery_ == RecoveryPolicy::Full) {
+            state_ = SketchState::NeedsRecovery;
+            for (auto& buffer : buffers_) {
+                buffer.clear();
+            }
+            std::fill(thresholds_.begin(), thresholds_.end(), std::nullopt);
+            std::fill(signature_.begin(), signature_.end(), hash_type{});
+            for (; first != last; ++first) {
+                insert_unchecked(*first);
+            }
+        } else {
+            if (state_ == SketchState::Ready) {
+                pending_.clear();
+                for (std::size_t i = 0; i < buffers_.size(); ++i) {
+                    pending_.push_back(i);
+                }
+            }
+            state_ = SketchState::NeedsRecovery;
+            for (const auto i : pending_) {
+                buffers_[i].clear();
+                thresholds_[i].reset();
+                signature_[i] = hash_type{};
+            }
+            // Keep this fixed list until the entire scan succeeds, including
+            // when a retry follows an interrupted scan with partially filled buffers.
+            for (; first != last; ++first) {
+                const Element element = *first;
+                for (const auto i : pending_) {
+                    insert_into_buffer(i, element);
+                }
+            }
+            pending_.clear();
         }
         state_ = SketchState::Ready;
     }
 
     /**
-     * @brief Rebuilds every buffer from a single pass over the current set.
+     * @brief Restores from the current set using the configured recovery policy.
      * @tparam Range Input range whose value type is exactly element_type.
      * @param elements Coherent current set, including the fault-triggering
      * deletion. Empty ranges are supported; repeated elements only for General streams.
@@ -408,28 +472,34 @@ private:
 
     void insert_unchecked(Element element) {
         for (std::size_t i = 0; i < buffers_.size(); ++i) {
-            const auto entry = make_entry((*hashes_)[i](element), element);
-            if (thresholds_[i] && entry > *thresholds_[i]) {
-                continue;
-            }
-            auto& buffer = buffers_[i];
-            if (!buffer.insert(entry)) {
-                continue;
-            }
-            if (buffer.size() == capacity_) {
-                thresholds_[i] = buffer.maximum();
-            }
-            if (buffer.size() == 1 || entry_hash(entry) < signature_[i]) {
-                signature_[i] = entry_hash(entry);
-            }
+            insert_into_buffer(i, element);
+        }
+    }
+
+    void insert_into_buffer(std::size_t i, Element element) {
+        const auto entry = make_entry((*hashes_)[i](element), element);
+        if (thresholds_[i] && entry > *thresholds_[i]) {
+            return;
+        }
+        auto& buffer = buffers_[i];
+        if (!buffer.insert(entry)) {
+            return;
+        }
+        if (buffer.size() == capacity_) {
+            thresholds_[i] = buffer.maximum();
+        }
+        if (buffer.size() == 1 || entry_hash(entry) < signature_[i]) {
+            signature_[i] = entry_hash(entry);
         }
     }
 
     hash_family_ptr hashes_;
     std::size_t capacity_;
+    RecoveryPolicy recovery_;
     std::vector<buffer_type> buffers_;
     std::vector<std::optional<entry_type>> thresholds_;
     std::vector<hash_type> signature_;
+    std::vector<std::size_t> pending_;
     SketchState state_ = SketchState::Ready;
 };
 

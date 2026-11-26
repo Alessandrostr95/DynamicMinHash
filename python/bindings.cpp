@@ -95,15 +95,19 @@ void bind_sketch(py::class_<S>& cls) {
         .def(py::init([](const Family& hashes) { return S(hashes.value); }), py::arg("hashes"),
         "Create an empty vanilla sketch sharing hashes; no buffer capacity is needed.");
     } else {
-        cls.def(py::init([](std::size_t k, std::size_t capacity, std::optional<std::uint64_t> seed) {
-            return seed ? S(k, capacity, *seed) : S(k, capacity);
+        cls.def(py::init([](std::size_t k, std::size_t capacity, std::optional<std::uint64_t> seed,
+                            bmh::RecoveryPolicy recovery) {
+            return seed ? S(k, capacity, *seed, recovery) : S(k, capacity, recovery);
         }), py::arg("k"), py::arg("capacity"), py::arg("seed") = py::none(),
-        "Create an empty sketch with k hashes and capacity entries per buffer. Both must be positive.")
-       .def(py::init([](std::size_t capacity, const Family& hashes) {
-            return S(capacity, hashes.value);
+        py::kw_only(), py::arg("recovery") = bmh::RecoveryPolicy::Full,
+        "Create an empty sketch with positive k and capacity. recovery selects Full (default) or EmptyOnly; it cannot be changed later.")
+       .def(py::init([](std::size_t capacity, const Family& hashes, bmh::RecoveryPolicy recovery) {
+            return S(capacity, hashes.value, recovery);
         }), py::arg("capacity"), py::arg("hashes"),
-        "Create an empty sketch sharing hashes; k is derived from that configuration.")
-        .def("buffer_capacity", &S::buffer_capacity, "Return the maximum entries per buffer (ell).");
+        py::kw_only(), py::arg("recovery") = bmh::RecoveryPolicy::Full,
+        "Create an empty sketch sharing hashes; k is derived from that configuration. recovery is Full by default, or EmptyOnly for selective repair.")
+        .def("buffer_capacity", &S::buffer_capacity, "Return the maximum entries per buffer (ell).")
+        .def("recovery_policy", &S::recovery_policy, "Return the fixed recovery policy: Full or EmptyOnly.");
     }
     cls.def("insert", [](S& self, py::handle element) {
             return self.insert(checked_element<Element>(element));
@@ -114,14 +118,14 @@ void bind_sketch(py::class_<S>& cls) {
             return self.erase(checked_element<Element>(element));
         }, py::arg("element"),
         Vanilla ? "Delete after updating the external set; absent elements are harmless. Invalidate all coordinates won by this element, returning NeedsRecovery if any are lost. Reads and updates then require restore."
-        : legal ? "Delete an element that was present before updating the external set (unchecked). Returns NeedsRecovery if a buffer empties; then call restore."
-              : "Delete after updating the external set; absent elements are harmless. Returns NeedsRecovery if a buffer empties; then call restore.")
+        : legal ? "Delete an element that was present before updating the external set (unchecked). Full stops at the first empty buffer; EmptyOnly finishes all buffers. On NeedsRecovery, call restore."
+              : "Delete after updating the external set; absent elements are harmless. Full stops at the first empty buffer; EmptyOnly finishes all buffers. On NeedsRecovery, call restore.")
        .def("restore", [](S& self, py::iterable elements) {
             self.restore(ElementIterator<Element>{py::iter(elements)}, std::default_sentinel);
         }, py::arg("elements"),
         Vanilla ? "After a fault, scan the unchanged current set after the triggering deletion and recompute only lost coordinates, preserving valid entries. When Ready, rebuild all coordinates to initialize or replace the set. Accepts generators, duplicates and empty iterables; retains hashes."
-        : legal ? "Rebuild from the current set in one pass. Requires distinct elements (unchecked); accepts generators and empty iterables; retains hashes."
-              : "Rebuild from the current set in one pass. Accepts generators, duplicates and empty iterables; retains hashes.")
+        : legal ? "Scan the current set once. Full rebuilds all buffers. EmptyOnly after a fault repairs only exhausted buffers, preserving others and their thresholds: supply the set immediately after the triggering deletion with no further changes. When Ready, rebuild all buffers. Requires distinct elements (unchecked); accepts generators and empty iterables. An interrupted scan keeps its repair targets for retry."
+              : "Scan the current set once. Full rebuilds all buffers. EmptyOnly after a fault repairs only exhausted buffers, preserving others and their thresholds: supply the set immediately after the triggering deletion with no further changes. When Ready, rebuild all buffers. Accepts generators, duplicates and empty iterables. An interrupted scan keeps its repair targets for retry.")
        .def("signature", &S::copy_signature,
         "Return an independent list of hash values, or None for a known empty set. Raises RuntimeError on fault.")
        .def("copy_signature", &S::copy_signature,
@@ -182,6 +186,9 @@ void bind_width(py::module_& module, const char* family_name, const char* array_
 PYBIND11_MODULE(buffered_minhash, module) {
     module.doc() = "Buffered and vanilla MinHash for dynamic sets with explicit recovery and shared immutable hashes.";
     module.attr("__version__") = "0.1.0";
+    py::enum_<bmh::RecoveryPolicy>(module, "RecoveryPolicy", "Buffered reconstruction strategy, fixed at construction.")
+        .value("Full", bmh::RecoveryPolicy::Full, "Stop deletion at the first fault and rebuild every buffer.")
+        .value("EmptyOnly", bmh::RecoveryPolicy::EmptyOnly, "Finish deletion and rebuild only exhausted buffers.");
     py::enum_<bmh::UpdateResult>(module, "UpdateResult", "Validity after an update, not a membership result.")
         .value("Ok", bmh::UpdateResult::Ok)
         .value("NeedsRecovery", bmh::UpdateResult::NeedsRecovery);

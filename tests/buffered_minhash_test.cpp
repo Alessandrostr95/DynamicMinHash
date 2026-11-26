@@ -279,7 +279,7 @@ void configuration_cases() {
 // Each collision pattern runs separately so a constant hash cannot mask a bug
 // in another buffer by always triggering an earlier recovery.
 template<BufferKind Kind, StreamKind Stream = StreamKind::General>
-void exhaustive_cases() {
+void exhaustive_cases(RecoveryPolicy recovery = RecoveryPolicy::Full) {
     using Hash = TestHash<std::uint32_t>;
     using Sketch = BufferedMinhash<std::uint32_t, Kind, Hash, Stream>;
     const std::vector<std::vector<Hash>> configurations = Stream == StreamKind::Legal
@@ -315,7 +315,7 @@ void exhaustive_cases() {
                     }
                 }
             };
-            visit(visit, Sketch(capacity, hashes), {}, Stream == StreamKind::Legal ? 9 : 6);
+            visit(visit, Sketch(capacity, hashes, recovery), {}, Stream == StreamKind::Legal ? 9 : 6);
         }
     }
 }
@@ -525,6 +525,110 @@ struct CountingHash {
     }
     bool operator==(const CountingHash& other) const { return function == other.function; }
 };
+
+template<BufferKind Kind, StreamKind Stream, ElementType Element, HashValueType Value>
+void buffered_policy_cases() {
+    using Hash = CountingHash<Element, Value>;
+    using Sketch = BufferedMinhash<Element, Kind, Hash, Stream>;
+    auto calls = std::make_shared<std::array<std::size_t, 4>>();
+    constexpr Value maximum = std::numeric_limits<Value>::max();
+    const auto hashes = family<Hash>({
+        {{maximum, 0}, calls, 0}, {{maximum, 3}, calls, 1},
+        {{maximum, 2}, calls, 2}, {{maximum, 0}, calls, 3}});
+    check_throws<std::invalid_argument>([&] {
+        Sketch invalid(2, hashes, static_cast<RecoveryPolicy>(99));
+    });
+    Sketch full(2, hashes);
+    CHECK(full.recovery_policy() == RecoveryPolicy::Full);
+    Sketch lazy(2, hashes, RecoveryPolicy::EmptyOnly);
+    CHECK(lazy.compatible_with(full));
+    for (auto* sketch : {&full, &lazy}) {
+        CHECK(sketch->erase(9) == UpdateResult::Ok); // Known empty is not a fault.
+        sketch->restore(std::vector<Element>{0, 1, 2, 3});
+        CHECK(sketch->erase(3) == UpdateResult::Ok);
+        CHECK(sketch->erase(1) == UpdateResult::Ok);
+        calls->fill(0);
+        CHECK(sketch->erase(0) == UpdateResult::NeedsRecovery);
+        const bool selective = sketch->recovery_policy() == RecoveryPolicy::EmptyOnly;
+        CHECK(*calls == (selective ? std::array<std::size_t, 4>{1, 1, 1, 1}
+                                  : std::array<std::size_t, 4>{1, 0, 0, 0}));
+        check_throws<std::logic_error>([&] { (void)sketch->signature(); });
+        check_throws<std::logic_error>([&] { (void)sketch->insert(4); });
+        check_throws<std::logic_error>([&] { (void)sketch->erase(2); });
+    }
+    Sketch fault_copy(lazy);
+    Sketch assigned(2, hashes);
+    assigned = lazy;
+    Sketch moved(std::move(assigned));
+    check_throws<std::logic_error>([&] { assigned.restore(std::vector<Element>{2}); });
+    assigned = std::move(moved);
+    CHECK(assigned.recovery_policy() == RecoveryPolicy::EmptyOnly);
+    for (auto* sketch : {&full, &lazy, &fault_copy, &assigned}) {
+        calls->fill(0);
+        sketch->restore(std::vector<Element>{2});
+        CHECK(*calls == (sketch->recovery_policy() == RecoveryPolicy::Full
+            ? std::array<std::size_t, 4>{1, 1, 1, 1} : std::array<std::size_t, 4>{1, 0, 0, 1}));
+        check_signature(*sketch, {2});
+    }
+    CHECK(similarity(full, lazy) == 1.0);
+
+    // Surviving buffers 1 and 2 are PARTIAL and retain finite thresholds.
+    // Rebuilt buffers 0 and 3 are partial with infinite thresholds. Inserting
+    // 4 must therefore enter only 0 and 3; deleting 2 faults only 1 and 2.
+    CHECK(lazy.insert(4) == UpdateResult::Ok);
+    check_signature(lazy, {2, 4});
+    CHECK(lazy.erase(2) == UpdateResult::NeedsRecovery);
+    calls->fill(0);
+    auto failing_scan = std::views::iota(0, 2) | std::views::transform([](int i) -> Element {
+        if (i == 1) { throw std::runtime_error("interrupted recovery"); }
+        return Element{4};
+    });
+    check_throws<std::runtime_error>([&] { lazy.restore(failing_scan); });
+    CHECK(lazy.state() == SketchState::NeedsRecovery);
+    CHECK(*calls == std::array<std::size_t, 4>{0, 1, 1, 0});
+    Sketch interrupted_copy(lazy);
+    for (auto* sketch : {&lazy, &interrupted_copy}) {
+        calls->fill(0);
+        sketch->restore(std::vector<Element>{4});
+        CHECK(*calls == std::array<std::size_t, 4>{0, 1, 1, 0});
+        check_signature(*sketch, {4});
+        CHECK(sketch->erase(4) == UpdateResult::NeedsRecovery);
+        sketch->restore(std::vector<Element>{});
+        check_signature(*sketch, {});
+    }
+
+    // A Ready-state replacement must target ALL coordinates, also on retry.
+    check_throws<std::runtime_error>([&] { lazy.restore(failing_scan); });
+    calls->fill(0);
+    lazy.restore(std::vector<Element>{4});
+    CHECK(*calls == std::array<std::size_t, 4>{1, 1, 1, 1});
+    check_signature(lazy, {4});
+    CHECK(lazy.erase(4) == UpdateResult::NeedsRecovery);
+    lazy.restore(std::vector<Element>{});
+    check_signature(lazy, {});
+
+    // Fixed repair targets must receive the WHOLE one-pass input, not just its
+    // first element. Full survivors also remain untouched by selective repair.
+    Sketch many(2, hashes, RecoveryPolicy::EmptyOnly);
+    many.restore(std::vector<Element>{0, 1, 2, 3});
+    CHECK(many.erase(1) == UpdateResult::Ok);
+    CHECK(many.erase(0) == UpdateResult::NeedsRecovery);
+    calls->fill(0);
+    std::istringstream input("3 2");
+    many.restore(std::istream_iterator<Element>{input}, std::istream_iterator<Element>{});
+    CHECK(*calls == std::array<std::size_t, 4>{2, 0, 0, 2});
+    check_signature(many, {2, 3});
+    CHECK(many.erase(2) == UpdateResult::Ok);
+    check_signature(many, {3});
+}
+
+template<ElementType Element, HashValueType Value>
+void buffered_policy_width_cases() {
+    buffered_policy_cases<BufferKind::Array, StreamKind::General, Element, Value>();
+    buffered_policy_cases<BufferKind::Tree, StreamKind::General, Element, Value>();
+    buffered_policy_cases<BufferKind::Array, StreamKind::Legal, Element, Value>();
+    buffered_policy_cases<BufferKind::Tree, StreamKind::Legal, Element, Value>();
+}
 
 template<ElementType Element, HashValueType Value>
 void vanilla_selective_recovery_cases() {
@@ -752,6 +856,14 @@ int main() {
         legal_deterministic_cases<BufferKind::Tree, std::uint64_t, std::uint64_t>();
         exhaustive_cases<BufferKind::Array, StreamKind::Legal>();
         exhaustive_cases<BufferKind::Tree, StreamKind::Legal>();
+        exhaustive_cases<BufferKind::Array>(RecoveryPolicy::EmptyOnly);
+        exhaustive_cases<BufferKind::Tree>(RecoveryPolicy::EmptyOnly);
+        exhaustive_cases<BufferKind::Array, StreamKind::Legal>(RecoveryPolicy::EmptyOnly);
+        exhaustive_cases<BufferKind::Tree, StreamKind::Legal>(RecoveryPolicy::EmptyOnly);
+        buffered_policy_width_cases<std::uint32_t, std::uint32_t>();
+        buffered_policy_width_cases<std::uint32_t, std::uint64_t>();
+        buffered_policy_width_cases<std::uint64_t, std::uint32_t>();
+        buffered_policy_width_cases<std::uint64_t, std::uint64_t>();
         randomized_cases<std::uint32_t>(make_hash_family<>(5, 42));
         randomized_cases<std::uint64_t>(make_hash_family<std::uint64_t>(5, 42));
         using Colliding = TestHash<std::uint32_t>;
